@@ -1,7 +1,13 @@
-const { auth, db } = require('../config/firebase');
+const { db } = require('../config/firebase');
 const { success, error } = require('../utils/responseFormatter');
 const { generateAccessToken, generateRefreshToken, verifyToken } = require('../utils/jwt');
 const crypto = require('crypto');
+
+// Simple hash function to match what's used in the Flutter code
+function simpleHash(input) {
+  const bytes = Buffer.from(input, 'utf-8');
+  return bytes.toString('base64');
+}
 
 /**
  * Register a new user
@@ -11,33 +17,57 @@ exports.register = async (req, res, next) => {
   try {
     const { email, password, displayName } = req.body;
 
-    // Create user in Firebase Auth
-    const userRecord = await auth.createUser({
-      email,
-      password,
-      displayName,
-    });
+    // Check if user already exists
+    const snapshot = await db.collection('users')
+      .where('email', '==', email)
+      .get();
+    
+    if (!snapshot.empty) {
+      return next(error('Email already in use', 400));
+    }
 
-    // Create user document in Firestore
-    await db.collection('users').doc(userRecord.uid).set({
+    // Hash the password
+    const hashedPassword = simpleHash(password);
+
+    // Create new user document in Firestore
+    const userRef = db.collection('users').doc();
+    const userId = userRef.id;
+    
+    await userRef.set({
+      id: userId,
       email,
-      displayName,
-      createdAt: new Date(),
+      password: hashedPassword,
+      displayName: displayName || '',
       status: 'active',
-      role: 'user'
+      role: 'user',
+      createdAt: new Date(),
+      updatedAt: new Date()
     });
 
     // Generate tokens
     const tokens = {
-      accessToken: generateAccessToken({ uid: userRecord.uid, email, role: 'user' }),
-      refreshToken: generateRefreshToken({ uid: userRecord.uid })
+      accessToken: generateAccessToken({ uid: userId, email, role: 'user' }),
+      refreshToken: generateRefreshToken({ uid: userId })
     };
 
+    // Store refresh token hash
+    const refreshTokenHash = crypto
+      .createHash('sha256')
+      .update(tokens.refreshToken)
+      .digest('hex');
+
+    await db.collection('users').doc(userId).collection('tokens').add({
+      tokenHash: refreshTokenHash,
+      createdAt: new Date(),
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
+    });
+
     res.status(201).json(success({ 
-      uid: userRecord.uid,
+      uid: userId,
       ...tokens 
     }, 'User registered successfully'));
   } catch (err) {
+    console.error('Registration error:', err);
     next(error(err.message, 400));
   }
 };
@@ -50,41 +80,43 @@ exports.login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
 
-    // Verify with Firebase Auth
-    let userRecord;
-    try {
-      // Find user by email
-      const userResults = await auth.getUserByEmail(email);
-      userRecord = userResults;
-    } catch (firebaseError) {
+    // Find user by email
+    const snapshot = await db.collection('users')
+      .where('email', '==', email)
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
       return next(error('Invalid email or password', 401));
     }
 
-    // Get user from Firestore
-    const userDoc = await db.collection('users').doc(userRecord.uid).get();
-    if (!userDoc.exists) {
-      return next(error('User account not found', 404));
-    }
-
+    const userDoc = snapshot.docs[0];
     const userData = userDoc.data();
+    const userId = userDoc.id;
+
+    // Verify password
+    const hashedPassword = simpleHash(password);
+    if (hashedPassword !== userData.password) {
+      return next(error('Invalid email or password', 401));
+    }
 
     // Generate tokens
     const tokens = {
       accessToken: generateAccessToken({ 
-        uid: userRecord.uid, 
-        email: userRecord.email, 
+        uid: userId, 
+        email: userData.email, 
         role: userData.role || 'user' 
       }),
-      refreshToken: generateRefreshToken({ uid: userRecord.uid })
+      refreshToken: generateRefreshToken({ uid: userId })
     };
 
-    // Store refresh token hash in database for validation later
+    // Store refresh token hash
     const refreshTokenHash = crypto
       .createHash('sha256')
       .update(tokens.refreshToken)
       .digest('hex');
 
-    await db.collection('users').doc(userRecord.uid).collection('tokens').add({
+    await db.collection('users').doc(userId).collection('tokens').add({
       tokenHash: refreshTokenHash,
       createdAt: new Date(),
       expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
@@ -92,8 +124,8 @@ exports.login = async (req, res, next) => {
 
     res.status(200).json(success({
       user: {
-        uid: userRecord.uid,
-        email: userRecord.email,
+        uid: userId,
+        email: userData.email,
         displayName: userData.displayName,
         photoURL: userData.photoURL,
         role: userData.role || 'user'
@@ -101,6 +133,7 @@ exports.login = async (req, res, next) => {
       ...tokens
     }, 'Login successful'));
   } catch (err) {
+    console.error('Login error:', err);
     next(error(err.message, 400));
   }
 };
@@ -232,16 +265,13 @@ exports.checkEmail = async (req, res, next) => {
       return next(error('Email is required', 400));
     }
 
-    let exists = false;
-    try {
-      await auth.getUserByEmail(email);
-      exists = true;
-    } catch (firebaseError) {
-      if (firebaseError.code !== 'auth/user-not-found') {
-        return next(error(firebaseError.message, 500));
-      }
-      // User not found, exists = false
-    }
+    // Check Firestore for email
+    const snapshot = await db.collection('users')
+      .where('email', '==', email)
+      .limit(1)
+      .get();
+
+    const exists = !snapshot.empty;
 
     res.status(200).json(success({ exists }));
   } catch (err) {
@@ -261,6 +291,22 @@ exports.resetPassword = async (req, res, next) => {
       return next(error('Email is required', 400));
     }
 
+    // Find user by email
+    const snapshot = await db.collection('users')
+      .where('email', '==', email)
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      // Don't reveal whether the email exists
+      return res.status(200).json(success({
+        message: 'If an account with that email exists, password reset instructions have been sent'
+      }));
+    }
+
+    const userDoc = snapshot.docs[0];
+    const userId = userDoc.id;
+
     // Generate reset token
     const resetToken = crypto.randomBytes(32).toString('hex');
     const resetTokenHash = crypto
@@ -270,30 +316,21 @@ exports.resetPassword = async (req, res, next) => {
 
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour from now
 
-    try {
-      // Find user
-      const userRecord = await auth.getUserByEmail(email);
-      
-      // Store reset token in Firestore
-      await db.collection('users').doc(userRecord.uid).update({
-        passwordReset: {
-          token: resetTokenHash,
-          expiresAt
-        }
-      });
+    // Store reset token in Firestore
+    await db.collection('users').doc(userId).update({
+      passwordReset: {
+        token: resetTokenHash,
+        expiresAt
+      }
+    });
 
-      // In a real application, send an email with reset link
-      // For testing, we'll return the token
-      res.status(200).json(success({
-        message: 'Password reset instructions sent',
-        resetToken // This would normally not be returned in production
-      }));
-    } catch (firebaseError) {
-      // Don't reveal whether the email exists
-      res.status(200).json(success({
-        message: 'If an account with that email exists, password reset instructions have been sent'
-      }));
-    }
+    // In a real application, send an email with reset link
+    // For testing, we'll return the token
+    res.status(200).json(success({
+      message: 'Password reset instructions sent',
+      resetToken // This would normally not be returned in production
+    }));
+
   } catch (err) {
     next(error(err.message, 400));
   }
@@ -311,44 +348,42 @@ exports.resetPasswordConfirm = async (req, res, next) => {
       return next(error('Email, token and password are required', 400));
     }
 
+    // Find user by email
+    const snapshot = await db.collection('users')
+      .where('email', '==', email)
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      return next(error('Invalid or expired reset token', 400));
+    }
+
+    const userDoc = snapshot.docs[0];
+    const userData = userDoc.data();
+    const userId = userDoc.id;
+    const resetData = userData.passwordReset;
+
     const tokenHash = crypto
       .createHash('sha256')
       .update(token)
       .digest('hex');
 
-    try {
-      // Find user
-      const userRecord = await auth.getUserByEmail(email);
-      const userDoc = await db.collection('users').doc(userRecord.uid).get();
-      
-      if (!userDoc.exists) {
-        return next(error('Invalid or expired reset token', 400));
-      }
-
-      const userData = userDoc.data();
-      const resetData = userData.passwordReset;
-
-      if (!resetData || 
-          resetData.token !== tokenHash || 
-          new Date(resetData.expiresAt.toDate()) < new Date()) {
-        return next(error('Invalid or expired reset token', 400));
-      }
-
-      // Update password in Firebase Auth
-      await auth.updateUser(userRecord.uid, {
-        password
-      });
-
-      // Clear reset token
-      await db.collection('users').doc(userRecord.uid).update({
-        passwordReset: null,
-        updatedAt: new Date()
-      });
-
-      res.status(200).json(success({}, 'Password reset successfully'));
-    } catch (firebaseError) {
+    // Verify token
+    if (!resetData || 
+        resetData.token !== tokenHash || 
+        new Date(resetData.expiresAt.toDate()) < new Date()) {
       return next(error('Invalid or expired reset token', 400));
     }
+
+    // Update password
+    const hashedPassword = simpleHash(password);
+    await db.collection('users').doc(userId).update({
+      password: hashedPassword,
+      passwordReset: null,
+      updatedAt: new Date()
+    });
+
+    res.status(200).json(success({}, 'Password reset successfully'));
   } catch (err) {
     next(error(err.message, 400));
   }
@@ -366,24 +401,27 @@ exports.setPassword = async (req, res, next) => {
       return next(error('Email and password are required', 400));
     }
 
-    // Find user in Firebase Auth
-    try {
-      const userRecord = await auth.getUserByEmail(email);
-      
-      // Update password in Firebase Auth
-      await auth.updateUser(userRecord.uid, {
-        password
-      });
+    // Find user by email
+    const snapshot = await db.collection('users')
+      .where('email', '==', email)
+      .limit(1)
+      .get();
 
-      // Update any necessary fields in Firestore
-      await db.collection('users').doc(userRecord.uid).update({
-        updatedAt: new Date()
-      });
-
-      res.status(200).json(success({}, 'Password updated successfully'));
-    } catch (firebaseError) {
+    if (snapshot.empty) {
       return next(error('User not found', 404));
     }
+
+    const userDoc = snapshot.docs[0];
+    const userId = userDoc.id;
+
+    // Update password
+    const hashedPassword = simpleHash(password);
+    await db.collection('users').doc(userId).update({
+      password: hashedPassword,
+      updatedAt: new Date()
+    });
+
+    res.status(200).json(success({}, 'Password updated successfully'));
   } catch (err) {
     next(error(err.message, 400));
   }
@@ -408,7 +446,7 @@ exports.getCurrentUser = async (req, res, next) => {
     const userData = userDoc.data();
     
     // Remove sensitive information
-    const { passwordReset, ...user } = userData;
+    const { password, passwordReset, ...user } = userData;
 
     res.status(200).json(success(user));
   } catch (err) {
@@ -424,12 +462,6 @@ exports.updateProfile = async (req, res, next) => {
   try {
     const { uid } = req.user;
     const { displayName, photoURL } = req.body;
-
-    // Update in Firebase Auth
-    await auth.updateUser(uid, {
-      displayName,
-      photoURL
-    });
 
     // Update in Firestore
     await db.collection('users').doc(uid).update({
@@ -452,9 +484,6 @@ exports.deleteAccount = async (req, res, next) => {
   try {
     const { uid } = req.user;
 
-    // Delete from Firebase Auth
-    await auth.deleteUser(uid);
-    
     // Delete from Firestore
     await db.collection('users').doc(uid).delete();
 
@@ -512,45 +541,41 @@ exports.verifyEmailConfirm = async (req, res, next) => {
       return next(error('Email and token are required', 400));
     }
 
+    // Find user by email
+    const snapshot = await db.collection('users')
+      .where('email', '==', email)
+      .limit(1)
+      .get();
+
+    if (snapshot.empty) {
+      return next(error('Invalid or expired verification token', 400));
+    }
+
+    const userDoc = snapshot.docs[0];
+    const userData = userDoc.data();
+    const userId = userDoc.id;
+    const verificationData = userData.emailVerification;
+
     const tokenHash = crypto
       .createHash('sha256')
       .update(token)
       .digest('hex');
 
-    try {
-      // Find user
-      const userRecord = await auth.getUserByEmail(email);
-      const userDoc = await db.collection('users').doc(userRecord.uid).get();
-      
-      if (!userDoc.exists) {
-        return next(error('Invalid or expired verification token', 400));
-      }
-
-      const userData = userDoc.data();
-      const verificationData = userData.emailVerification;
-
-      if (!verificationData || 
-          verificationData.token !== tokenHash || 
-          new Date(verificationData.expiresAt.toDate()) < new Date()) {
-        return next(error('Invalid or expired verification token', 400));
-      }
-
-      // Update in Firebase Auth
-      await auth.updateUser(userRecord.uid, {
-        emailVerified: true
-      });
-
-      // Clear verification token
-      await db.collection('users').doc(userRecord.uid).update({
-        emailVerification: null,
-        emailVerified: true,
-        updatedAt: new Date()
-      });
-
-      res.status(200).json(success({}, 'Email verified successfully'));
-    } catch (firebaseError) {
+    // Verify token
+    if (!verificationData || 
+        verificationData.token !== tokenHash || 
+        new Date(verificationData.expiresAt.toDate()) < new Date()) {
       return next(error('Invalid or expired verification token', 400));
     }
+
+    // Update email verified status
+    await db.collection('users').doc(userId).update({
+      emailVerification: null,
+      emailVerified: true,
+      updatedAt: new Date()
+    });
+
+    res.status(200).json(success({}, 'Email verified successfully'));
   } catch (err) {
     next(error(err.message, 400));
   }

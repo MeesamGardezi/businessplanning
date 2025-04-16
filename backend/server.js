@@ -6,7 +6,14 @@ const { admin } = require('./config/firebase');
 // Start the server
 const server = app.listen(port, () => {
   console.log(`Server running in ${nodeEnv} mode on port ${port}`);
-  console.log(`Firebase Admin SDK initialized for project: ${admin.app().options.projectId}`);
+  
+  try {
+    const projectId = admin.app().options.projectId || 
+                     (admin.app().options.credential && admin.app().options.credential.projectId);
+    console.log(`Firebase Admin SDK initialized for project: ${projectId}`);
+  } catch (err) {
+    console.error('Error getting Firebase project ID:', err.message);
+  }
 });
 
 // Handle unhandled promise rejections
