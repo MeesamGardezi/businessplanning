@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "597972730408",
+    "project_id": "businessplanning-development",
+    "storage_bucket": "businessplanning-development.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:597972730408:android:7329357934690ad7e0eb1d",
+        "android_client_info": {
+          "package_name": "com.businessplanning"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBb00xs_SPfgydXpDUbnoj5eBknhSOmExc"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
