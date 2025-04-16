@@ -1,7 +1,9 @@
-const { auth } = require('../config/firebase');
+const { verifyToken } = require('../utils/jwt');
+const { error } = require('../utils/responseFormatter');
+const { auth, db } = require('../config/firebase');
 
 /**
- * Middleware to verify Firebase authentication token
+ * Middleware to verify JWT authentication token
  */
 exports.authenticate = async (req, res, next) => {
   try {
@@ -16,14 +18,40 @@ exports.authenticate = async (req, res, next) => {
     
     const token = authHeader.split(' ')[1];
     
-    // Verify the token
-    const decodedToken = await auth.verifyIdToken(token);
+    // Verify the JWT token
+    const decoded = verifyToken(token);
+    if (!decoded) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'Invalid or expired token.' 
+      });
+    }
+
+    // Verify user exists in Firebase
+    try {
+      await auth.getUser(decoded.uid);
+    } catch (firebaseError) {
+      console.error('Firebase authentication error:', firebaseError);
+      return res.status(403).json({ 
+        success: false, 
+        message: 'User not found or deactivated.' 
+      });
+    }
     
+    // Fetch user data from Firestore
+    const userDoc = await db.collection('users').doc(decoded.uid).get();
+    if (!userDoc.exists) {
+      return res.status(403).json({ 
+        success: false, 
+        message: 'User not found in database.' 
+      });
+    }
+
     // Add the user to the request object
     req.user = {
-      uid: decodedToken.uid,
-      email: decodedToken.email,
-      emailVerified: decodedToken.email_verified
+      uid: decoded.uid,
+      email: decoded.email,
+      role: decoded.role || 'user'
     };
     
     next();
@@ -32,7 +60,22 @@ exports.authenticate = async (req, res, next) => {
     
     return res.status(403).json({ 
       success: false, 
-      message: 'Invalid or expired token.' 
+      message: 'Authentication failed.' 
     });
   }
+};
+
+/**
+ * Middleware to verify admin role
+ * Must be used after the authenticate middleware
+ */
+exports.authorizeAdmin = (req, res, next) => {
+  if (req.user && req.user.role === 'admin') {
+    return next();
+  }
+  
+  return res.status(403).json({
+    success: false,
+    message: 'Access denied. Admin privileges required.'
+  });
 };
