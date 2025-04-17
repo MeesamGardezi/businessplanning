@@ -3,6 +3,7 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../services/auth_service.dart';
 
 class LoginPage extends StatefulWidget {
@@ -48,9 +49,33 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
     );
     _animationController.forward();
     
+    // Check for existing token and clear if invalid
+    _checkExistingSession();
+    
     WidgetsBinding.instance.addPostFrameCallback((_) {
       FocusScope.of(context).requestFocus(_emailFocusNode);
     });
+  }
+
+  Future<void> _checkExistingSession() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getString('access_token') != null) {
+      // We have a token, but need to verify if it's still valid
+      try {
+        final isLoggedIn = await _auth.isLoggedIn();
+        if (!isLoggedIn) {
+          // If not valid, make sure we're properly logged out
+          await _auth.setLoggedOut();
+          setState(() {
+            error = 'Your session has expired. Please log in again.';
+          });
+        }
+      } catch (e) {
+        // Error occurred while checking login status
+        print('Session validation error: $e');
+        await _auth.setLoggedOut();
+      }
+    }
   }
 
   @override
