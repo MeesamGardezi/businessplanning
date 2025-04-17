@@ -1,11 +1,13 @@
-import 'package:businessplanning/pages/all_projects_page.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'dart:convert';
 
-import '../routes.dart';
+import '../models/project_model.dart';
+import '../routes/app_router.dart';
 import '../services/auth_service.dart';
+import '../state/app_state.dart';
+import '../theme.dart';
+import 'all_projects_page.dart';
 
 class DashboardPage extends StatefulWidget {
   final String pageContent;
@@ -21,18 +23,15 @@ class DashboardPage extends StatefulWidget {
   State<DashboardPage> createState() => _DashboardPageState();
 }
 
-class _DashboardPageState extends State<DashboardPage>
-    with SingleTickerProviderStateMixin {
+class _DashboardPageState extends State<DashboardPage> {
+  // Access global state
+  final AppState _appState = AppState();
   final AuthService _auth = AuthService();
-  late Widget _currentPage;
-  late AnimationController _animationController;
-  late Animation<double> _fadeAnimation;
-
+  
   // Design Constants
-  static const double _borderRadius = 24.0;
-  static const double _shadowOpacity = 0.08;
-  static const double _spacing = 24.0;
-  static const Duration _animationDuration = Duration(milliseconds: 400);
+  static const double _sidebarWidth = 64.0;
+  static const double _spacing = 16.0;
+  static const Duration _animationDuration = Duration.zero;
 
   static const List<({String label, IconData icon, String route})> _navItems = [
     (label: 'Home', icon: Icons.home_outlined, route: 'home'),
@@ -42,21 +41,7 @@ class _DashboardPageState extends State<DashboardPage>
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
-      vsync: this,
-      duration: _animationDuration,
-    );
-    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
-    );
-    _updateCurrentPage();
-    _animationController.forward();
-  }
-
-  @override
-  void dispose() {
-    _animationController.dispose();
-    super.dispose();
+    _updateContent();
   }
 
   @override
@@ -64,296 +49,252 @@ class _DashboardPageState extends State<DashboardPage>
     super.didUpdateWidget(oldWidget);
     if (oldWidget.pageContent != widget.pageContent ||
         oldWidget.params != widget.params) {
-      _updateCurrentPage();
+      _updateContent();
     }
   }
 
-  void _updateCurrentPage() {
-    setState(() {
-      switch (widget.pageContent) {
-        case 'home':
-          _currentPage = Container();
-          break;
-        case 'projects':
-          _currentPage = AllProjectsPage();
-          break;
-        default:
-          _currentPage = Container();
+  void _updateContent() {
+    // Update the current page content in app state
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (widget.params.containsKey('projectId')) {
+        _appState.setSelectedProject(widget.params['projectId']);
+      }
+      
+      if (widget.params.containsKey('tab')) {
+        _appState.setCurrentTab(widget.params['tab']);
       }
     });
   }
 
   void _navigateWithParams(String path, Map<String, dynamic> params) {
-    router.go('$path?params=${Uri.encodeComponent(json.encode(params))}');
+    // Convert params to a JSON string and encode for URL
+    final encodedParams = Uri.encodeComponent(json.encode(params));
+    context.go('$path?params=$encodedParams');
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final isDark = theme.brightness == Brightness.dark;
+    
+    // Content to display based on current selection
+    Widget currentContent = _buildCurrentContent();
+    
     return Scaffold(
-      backgroundColor: Colors.grey[50],
-      body: Stack(
+      backgroundColor: theme.colorScheme.background,
+      body: Row(
         children: [
-          _buildBackground(),
-          Row(
-            children: [
-              _buildSidePanel(context),
-              Expanded(
-                child: FadeTransition(
-                  opacity: _fadeAnimation,
-                  child: AnimatedSwitcher(
-                    duration: _animationDuration,
-                    child: _currentPage,
-                  ),
-                ),
-              ),
-            ],
+          _buildSimplifiedSidebar(context),
+          Expanded(
+            child: AnimatedSwitcher(
+              duration: _animationDuration,
+              child: currentContent,
+            ),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildBackground() {
-    return Positioned.fill(
-      child: CustomPaint(
-        painter: DashboardBackgroundPainter(),
-      ),
-    );
+  Widget _buildCurrentContent() {
+    switch (widget.pageContent) {
+      case 'home':
+        return Container(); // Placeholder for home content
+      case 'projects':
+        return ValueListenableBuilder<Project?>(
+          valueListenable: _appState.selectedProject,
+          builder: (context, selectedProject, _) {
+            return ValueListenableBuilder<String>(
+              valueListenable: _appState.currentTab,
+              builder: (context, currentTab, _) {
+                return AllProjectsPage(
+                  selectedProjectId: selectedProject?.documentId,
+                  tab: currentTab,
+                );
+              },
+            );
+          },
+        );
+      default:
+        return Container(); // Default fallback
+    }
   }
 
-  Widget _buildSidePanel(BuildContext context) {
+  Widget _buildSimplifiedSidebar(BuildContext context) {
+    final theme = Theme.of(context);
+    final backgroundColor = theme.colorScheme.surfaceVariant;
+    final textColor = theme.colorScheme.onSurfaceVariant;
+    
     return Container(
-      width: 80,
-      decoration: BoxDecoration(
-        color: Colors.white,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(_shadowOpacity),
-            blurRadius: 20,
-            offset: const Offset(2, 0),
-          ),
-        ],
-      ),
+      width: _sidebarWidth,
+      color: backgroundColor,
       child: Column(
         children: [
-          const SizedBox(height: _spacing * 2),
-          _buildLogo(),
-          const SizedBox(height: _spacing * 2),
-          ..._navItems.map((item) => _buildNavButton(
+          const SizedBox(height: 16),
+          _buildMinimalLogo(context),
+          const SizedBox(height: 32),
+          Expanded(
+            child: ListView(
+              padding: EdgeInsets.zero,
+              children: _navItems.map((item) => _buildMinimalNavButton(
                 context,
                 item.icon,
                 item.label,
                 () => _navigateWithParams('/dashboard/${item.route}', {}),
-              )),
-          const Spacer(),
-          Divider(
-            color: Colors.grey[200],
-            height: 1,
+                item.label.toLowerCase().replaceAll(RegExp(r'\s+'), '') == widget.pageContent.toLowerCase(),
+              )).toList(),
+            ),
           ),
-          _buildSettingsButton(context),
-          const SizedBox(height: _spacing),
+          IconButton(
+            onPressed: () => _showLogoutMenu(context),
+            icon: Icon(
+              Icons.settings_outlined,
+              size: 20,
+              color: textColor,
+            ),
+            tooltip: 'Settings',
+          ),
+          const SizedBox(height: 16),
         ],
       ),
     );
   }
 
-  Widget _buildLogo() {
-    return Container(
-      height: 48,
-      width: 48,
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          colors: [Colors.teal.shade400, Colors.teal.shade700],
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
+  Widget _buildMinimalLogo(BuildContext context) {
+    final primaryColor = Theme.of(context).colorScheme.primary;
+    
+    return Padding(
+      padding: const EdgeInsets.all(8.0),
+      child: Container(
+        height: 32,
+        width: 32,
+        decoration: BoxDecoration(
+          color: primaryColor,
+          shape: BoxShape.circle,
         ),
-        borderRadius: BorderRadius.circular(_borderRadius),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.teal.withOpacity(0.3),
-            blurRadius: 12,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: const Center(
-        child: Text(
-          'M',
-          style: TextStyle(
-            color: Colors.white,
-            fontSize: 24,
-            fontWeight: FontWeight.bold,
+        child: const Center(
+          child: Text(
+            'M',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+            ),
           ),
         ),
       ),
     );
   }
 
-  Widget _buildNavButton(
+  Widget _buildMinimalNavButton(
     BuildContext context,
     IconData icon,
     String label,
     VoidCallback onPressed,
+    bool isSelected,
   ) {
-    final bool isSelected = widget.pageContent.toLowerCase() ==
-        label.toLowerCase().replaceAll(RegExp(r'\s+'), '');
-
-    return Material(
-      color: Colors.transparent,
+    final primaryColor = Theme.of(context).colorScheme.primary;
+    final textColor = Theme.of(context).colorScheme.onSurfaceVariant;
+    
+    return Tooltip(
+      message: label,
+      preferBelow: false,
       child: InkWell(
         onTap: onPressed,
         child: Container(
+          height: 48,
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 16),
           decoration: BoxDecoration(
-            color: isSelected ? Colors.teal.shade50 : Colors.transparent,
-            border: Border(
-              left: BorderSide(
-                color: isSelected ? Colors.teal.shade700 : Colors.transparent,
-                width: 4,
-              ),
+            color: Colors.transparent,
+            border: isSelected 
+                ? Border(
+                    left: BorderSide(
+                      color: primaryColor,
+                      width: 3,
+                    ),
+                  )
+                : null,
+          ),
+          child: Center(
+            child: Icon(
+              icon,
+              size: 20,
+              color: isSelected ? primaryColor : textColor,
             ),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+        ),
+      ),
+    );
+  }
+
+  void _showLogoutMenu(BuildContext context) {
+    final theme = Theme.of(context);
+    final popupColor = theme.colorScheme.surface;
+    final textColor = theme.colorScheme.onSurface;
+    
+    showMenu(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        _sidebarWidth, 
+        MediaQuery.of(context).size.height - 100, 
+        0, 
+        0
+      ),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+      ),
+      elevation: 4,
+      items: [
+        PopupMenuItem<String>(
+          value: 'settings',
+          child: Row(
             children: [
               Icon(
-                icon,
-                size: 24,
-                color: isSelected ? Colors.teal.shade700 : Colors.grey[600],
+                Icons.settings_outlined,
+                color: textColor,
+                size: 18,
               ),
-              const SizedBox(height: 6),
+              const SizedBox(width: 12),
               Text(
-                label,
-                textAlign: TextAlign.center,
+                'Settings',
                 style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
-                  color: isSelected ? Colors.teal.shade700 : Colors.grey[600],
+                  color: textColor,
+                  fontSize: 14,
                 ),
               ),
             ],
           ),
         ),
-      ),
-    );
-  }
-
-  Widget _buildSettingsButton(BuildContext context) {
-    return PopupMenuButton<String>(
-      child: Container(
-        width: double.infinity,
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        child: Icon(
-          Icons.settings_outlined,
-          size: 24,
-          color: Colors.grey[700],
-        ),
-      ),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(_borderRadius / 2),
-      ),
-      position: PopupMenuPosition.over,
-      elevation: 4,
-      onSelected: (value) async {
-        if (value == 'logout') {
-          await _auth.signOut();
-          if (mounted) {
-            context.go('/login');
-          }
-        } else if (value == 'settings') {
-          _navigateWithParams('/dashboard/settings', {'section': 'general'});
-        }
-      },
-      itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
-        PopupMenuItem<String>(
-          value: 'settings',
-          child: ListTile(
-            leading: Icon(
-              Icons.settings_outlined,
-              color: Colors.grey[700],
-              size: 20,
-            ),
-            title: Text(
-              'Settings',
-              style: TextStyle(
-                color: Colors.grey[800],
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            contentPadding: EdgeInsets.zero,
-            visualDensity: VisualDensity.compact,
-          ),
-        ),
         PopupMenuItem<String>(
           value: 'logout',
-          child: ListTile(
-            leading: Icon(
-              Icons.logout_outlined,
-              color: Colors.grey[700],
-              size: 20,
-            ),
-            title: Text(
-              'Logout',
-              style: TextStyle(
-                color: Colors.grey[800],
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
+          onTap: () {
+            // Add a small delay to avoid rebuild issues during menu closing
+            Future.delayed(const Duration(milliseconds: 100), () async {
+              await _appState.signOut();
+              if (mounted && context.mounted) {
+                context.go('/login');
+              }
+            });
+          },
+          child: Row(
+            children: [
+              Icon(
+                Icons.logout_outlined,
+                color: textColor,
+                size: 18,
               ),
-            ),
-            contentPadding: EdgeInsets.zero,
-            visualDensity: VisualDensity.compact,
+              const SizedBox(width: 12),
+              Text(
+                'Logout',
+                style: TextStyle(
+                  color: textColor,
+                  fontSize: 14,
+                ),
+              ),
+            ],
           ),
         ),
       ],
     );
   }
-}
-
-class DashboardBackgroundPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.teal.shade50.withOpacity(0.3)
-      ..style = PaintingStyle.fill;
-
-    final path = Path()
-      ..moveTo(0, 0)
-      ..lineTo(size.width * 0.7, 0)
-      ..quadraticBezierTo(
-        size.width * 0.8,
-        size.height * 0.2,
-        size.width,
-        size.height * 0.15,
-      )
-      ..lineTo(size.width, 0)
-      ..lineTo(size.width, size.height)
-      ..lineTo(0, size.height)
-      ..close();
-
-    canvas.drawPath(path, paint);
-
-    final paint2 = Paint()
-      ..color = Colors.teal.shade100.withOpacity(0.2)
-      ..style = PaintingStyle.fill;
-
-    final path2 = Path()
-      ..moveTo(size.width, size.height)
-      ..lineTo(size.width * 0.3, size.height)
-      ..quadraticBezierTo(
-        size.width * 0.2,
-        size.height * 0.8,
-        0,
-        size.height * 0.85,
-      )
-      ..lineTo(0, size.height)
-      ..lineTo(size.width, size.height)
-      ..close();
-
-    canvas.drawPath(path2, paint2);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
