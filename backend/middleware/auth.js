@@ -1,6 +1,6 @@
 const { verifyToken } = require('../utils/jwt');
 const { error } = require('../utils/responseFormatter');
-const { auth, db } = require('../config/firebase');
+const { admin, db } = require('../config/firebase');
 
 /**
  * Middleware to verify JWT authentication token
@@ -18,7 +18,7 @@ exports.authenticate = async (req, res, next) => {
     
     const token = authHeader.split(' ')[1];
     
-    // Verify the JWT token
+    // Verify the JWT token using our custom verification
     const decoded = verifyToken(token);
     if (!decoded) {
       return res.status(403).json({ 
@@ -27,34 +27,33 @@ exports.authenticate = async (req, res, next) => {
       });
     }
 
-    // Verify user exists in Firebase
+    // Skip Firebase authentication check
+    // Just verify user exists in Firestore
     try {
-      await auth.getUser(decoded.uid);
-    } catch (firebaseError) {
-      console.error('Firebase authentication error:', firebaseError);
-      return res.status(403).json({ 
+      const userDoc = await db.collection('users').doc(decoded.uid).get();
+      
+      if (!userDoc.exists) {
+        return res.status(403).json({ 
+          success: false, 
+          message: 'User not found in database.' 
+        });
+      }
+      
+      // Add the user to the request object
+      req.user = {
+        uid: decoded.uid,
+        email: decoded.email,
+        role: decoded.role || 'user'
+      };
+      
+      next();
+    } catch (dbError) {
+      console.error('Database lookup error:', dbError);
+      return res.status(500).json({ 
         success: false, 
-        message: 'User not found or deactivated.' 
+        message: 'Error verifying user in database.' 
       });
     }
-    
-    // Fetch user data from Firestore
-    const userDoc = await db.collection('users').doc(decoded.uid).get();
-    if (!userDoc.exists) {
-      return res.status(403).json({ 
-        success: false, 
-        message: 'User not found in database.' 
-      });
-    }
-
-    // Add the user to the request object
-    req.user = {
-      uid: decoded.uid,
-      email: decoded.email,
-      role: decoded.role || 'user'
-    };
-    
-    next();
   } catch (error) {
     console.error('Authentication error:', error);
     
