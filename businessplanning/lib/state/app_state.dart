@@ -30,7 +30,7 @@ class AppState {
   final ValueNotifier<String?> userStatus = ValueNotifier<String?>(null);
 
   // ===== THEME STATE =====
-  final ValueNotifier<ThemeMode> themeMode = ValueNotifier<ThemeMode>(ThemeMode.system);
+  final ValueNotifier<ThemeMode> themeMode = ValueNotifier<ThemeMode>(ThemeMode.light);
   final ValueNotifier<bool> isDarkMode = ValueNotifier<bool>(false);
   
   // ===== PROJECT STATE =====

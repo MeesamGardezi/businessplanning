@@ -1486,3 +1486,71 @@ extension ThemeExtension on ThemeData {
         elevation: elevation,
       );
 }
+
+
+/// Background painter for decorative curved backgrounds
+/// Used throughout the app for consistent visual styling
+class BackgroundPainter extends CustomPainter {
+  final Color primaryColor;
+  final Color secondaryColor;
+  final double primaryOpacity;
+  final double secondaryOpacity;
+
+  BackgroundPainter({
+    this.primaryColor = const Color(0xFFE0F2F1), // teal.shade50
+    this.secondaryColor = const Color(0xFFB2DFDB), // teal.shade100
+    this.primaryOpacity = 0.3,
+    this.secondaryOpacity = 0.2,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final primaryPaint = Paint()
+      ..color = primaryColor.withOpacity(primaryOpacity)
+      ..style = PaintingStyle.fill;
+
+    final path = Path()
+      ..moveTo(0, 0)
+      ..lineTo(size.width * 0.7, 0)
+      ..quadraticBezierTo(
+        size.width * 0.8,
+        size.height * 0.2,
+        size.width,
+        size.height * 0.15,
+      )
+      ..lineTo(size.width, 0)
+      ..lineTo(size.width, size.height)
+      ..lineTo(0, size.height)
+      ..lineTo(0, 0)
+      ..close();
+
+    canvas.drawPath(path, primaryPaint);
+
+    // Add a second decorative curve
+    final path2 = Path()
+      ..moveTo(size.width, size.height)
+      ..lineTo(size.width * 0.3, size.height)
+      ..quadraticBezierTo(
+        size.width * 0.2,
+        size.height * 0.8,
+        0,
+        size.height * 0.85,
+      )
+      ..lineTo(0, size.height)
+      ..lineTo(size.width, size.height)
+      ..close();
+
+    final secondaryPaint = Paint()
+      ..color = secondaryColor.withOpacity(secondaryOpacity)
+      ..style = PaintingStyle.fill;
+
+    canvas.drawPath(path2, secondaryPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant BackgroundPainter oldDelegate) => 
+    oldDelegate.primaryColor != primaryColor ||
+    oldDelegate.secondaryColor != secondaryColor ||
+    oldDelegate.primaryOpacity != primaryOpacity ||
+    oldDelegate.secondaryOpacity != secondaryOpacity;
+}

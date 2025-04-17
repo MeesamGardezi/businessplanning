@@ -145,14 +145,17 @@ class _DashboardPageState extends State<DashboardPage> {
               )).toList(),
             ),
           ),
-          IconButton(
-            onPressed: () => _showLogoutMenu(context),
-            icon: Icon(
-              Icons.settings_outlined,
-              size: 20,
-              color: textColor,
+          // Using Builder to get the correct context for menu positioning
+          Builder(
+            builder: (buttonContext) => IconButton(
+              onPressed: () => _showLogoutMenu(buttonContext),
+              icon: Icon(
+                Icons.settings_outlined,
+                size: 20,
+                color: textColor,
+              ),
+              tooltip: 'Settings',
             ),
-            tooltip: 'Settings',
           ),
           const SizedBox(height: 16),
         ],
@@ -227,19 +230,26 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  void _showLogoutMenu(BuildContext context) {
+  void _showLogoutMenu(BuildContext buttonContext) {
     final theme = Theme.of(context);
-    final popupColor = theme.colorScheme.surface;
     final textColor = theme.colorScheme.onSurface;
+    
+    // Get position of the button using the buttonContext
+    final RenderBox button = buttonContext.findRenderObject() as RenderBox;
+    final RenderBox overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+    
+    // Calculate position based on the button's position
+    final RelativeRect position = RelativeRect.fromRect(
+      Rect.fromPoints(
+        button.localToGlobal(Offset.zero, ancestor: overlay),
+        button.localToGlobal(Offset(button.size.width, 0), ancestor: overlay),
+      ),
+      Offset.zero & overlay.size,
+    );
     
     showMenu(
       context: context,
-      position: RelativeRect.fromLTRB(
-        _sidebarWidth, 
-        MediaQuery.of(context).size.height - 100, 
-        0, 
-        0
-      ),
+      position: position,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(AppTheme.radiusMD),
       ),

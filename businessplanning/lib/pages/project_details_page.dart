@@ -1,11 +1,14 @@
+// lib/pages/project_details_page.dart
 import 'dart:convert';
-import 'package:businessplanning/pages/action_page.dart';
-import 'package:businessplanning/pages/pest_page.dart';
-import 'package:businessplanning/pages/swot_page.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+
 import '../models/project_model.dart';
-import '../services/project_service.dart';
+import '../pages/action_page.dart';
+import '../pages/pest_page.dart';
+import '../pages/swot_page.dart';
+import '../state/app_state.dart';
+import '../theme.dart';
 import '../widgets/url_updater/url_updater.dart';
 
 class IncomeSourcesTab extends StatelessWidget {
@@ -38,21 +41,15 @@ class ProjectDetailsPage extends StatefulWidget {
   State<ProjectDetailsPage> createState() => _ProjectDetailsPageState();
 }
 
-class _ProjectDetailsPageState extends State<ProjectDetailsPage>
-    with SingleTickerProviderStateMixin {
-  final ProjectService _projectService = ProjectService();
-  Project? _currentProject;
-  bool _isLoading = true;
-  String? _error;
-  int _currentIndex = 0;
-  late AnimationController _animationController;
-  late Animation<double> _fadeAnimation;
-
+class _ProjectDetailsPageState extends State<ProjectDetailsPage> {
+  // Access global state
+  final AppState _appState = AppState();
+  
   // Design Constants
   static const double _borderRadius = 24.0;
   static const double _shadowOpacity = 0.08;
   static const double _spacing = 24.0;
-  static const Duration _animationDuration = Duration(milliseconds: 400);
+  static const Duration _animationDuration = Duration.zero;
 
   static const List<({String label, IconData icon})> _tabs = [
     (label: 'Info', icon: Icons.info_outline),
@@ -65,27 +62,13 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
-      vsync: this,
-      duration: _animationDuration,
-    );
-    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
-    );
     _initializeState();
     _setupUrlListener();
-    _animationController.forward();
-  }
-
-  @override
-  void dispose() {
-    _animationController.dispose();
-    super.dispose();
   }
 
   void _initializeState() {
     _initializeTabIndex();
-    _setupProjectStream();
+    _fetchProjectData();
   }
 
   void _setupUrlListener() {
@@ -95,15 +78,14 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
       final uri = Uri.parse(url);
       if (uri.queryParameters['params'] == null) return;
 
-      final params =
-          json.decode(uri.queryParameters['params']!) as Map<String, dynamic>;
+      final params = json.decode(uri.queryParameters['params']!) as Map<String, dynamic>;
 
       if (params['projectId'] != widget.projectId || params['tab'] == null)
         return;
 
       final tabIndex = _tabs.indexWhere((tab) => tab.label == params['tab']);
       if (tabIndex != -1) {
-        setState(() => _currentIndex = tabIndex);
+        _appState.setCurrentTab(params['tab']);
       }
     });
   }
@@ -111,51 +93,42 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
   void _initializeTabIndex() {
     final tabIndex = _tabs.indexWhere((tab) => tab.label == widget.tab);
     if (tabIndex != -1) {
-      _currentIndex = tabIndex;
+      _appState.setCurrentTab(widget.tab);
     }
   }
 
-  void _setupProjectStream() {
-    _projectService.getProjectStream(widget.projectId).listen(
-      (project) {
-        if (mounted) {
-          setState(() {
-            _currentProject = project;
-            _isLoading = false;
-          });
-        }
-      },
-      onError: (error) {
-        if (mounted) {
-          setState(() {
-            _error = error.toString();
-            _isLoading = false;
-          });
-        }
-      },
-    );
+  void _fetchProjectData() {
+    _appState.isProjectsLoading.value = true;
+    _appState.projectError.value = null;
+    
+    // Check if we already have the project in state
+    if (_appState.selectedProject.value?.documentId == widget.projectId) {
+      _appState.isProjectsLoading.value = false;
+      return;
+    }
+    
+    // Set the selected project by ID
+    _appState.setSelectedProject(widget.projectId);
+    _appState.isProjectsLoading.value = false;
   }
 
-  void _updateTab(int index) {
-    setState(() => _currentIndex = index);
-    _updateUrl(index);
+  void _updateTab(String tabName) {
+    _appState.setCurrentTab(tabName);
+    _updateUrl(tabName);
   }
 
-  void _updateUrl(int index) {
-    final params = {'projectId': widget.projectId, 'tab': _tabs[index].label};
+  void _updateUrl(String tabName) {
+    final params = {'projectId': widget.projectId, 'tab': tabName};
 
     final uri = Uri.parse(GoRouterState.of(context).uri.toString());
-    final newUri =
-        uri.replace(queryParameters: {'params': json.encode(params)});
+    final newUri = uri.replace(queryParameters: {'params': json.encode(params)});
     updateBrowserUrl(newUri.toString());
   }
 
   void _retryLoading() {
-    setState(() {
-      _error = null;
-      _isLoading = true;
-    });
-    _setupProjectStream();
+    _appState.projectError.value = null;
+    _appState.isProjectsLoading.value = true;
+    _fetchProjectData();
   }
 
   String _formatDate(DateTime date) {
@@ -164,32 +137,47 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return _buildLoadingState();
-    }
+    return ValueListenableBuilder<bool>(
+      valueListenable: _appState.isProjectsLoading,
+      builder: (context, isLoading, _) {
+        if (isLoading) {
+          return _buildLoadingState();
+        }
 
-    if (_error != null) {
-      return _buildErrorState();
-    }
+        return ValueListenableBuilder<String?>(
+          valueListenable: _appState.projectError,
+          builder: (context, error, _) {
+            if (error != null) {
+              return _buildErrorState(error);
+            }
 
-    if (_currentProject == null) {
-      return _buildNotFoundState();
-    }
+            return ValueListenableBuilder<Project?>(
+              valueListenable: _appState.selectedProject,
+              builder: (context, project, _) {
+                if (project == null || project.documentId.isEmpty) {
+                  return _buildNotFoundState();
+                }
 
-    return Scaffold(
-      backgroundColor: Colors.grey[50],
-      body: Stack(
-        children: [
-          _buildBackground(),
-          Column(
-            children: [
-              _buildHeader(),
-              _buildTabBar(),
-              Expanded(child: _buildContent()),
-            ],
-          ),
-        ],
-      ),
+                return Scaffold(
+                  backgroundColor: Colors.grey[50],
+                  body: Stack(
+                    children: [
+                      _buildBackground(),
+                      Column(
+                        children: [
+                          _buildHeader(project),
+                          _buildTabBar(),
+                          Expanded(child: _buildContent(project)),
+                        ],
+                      ),
+                    ],
+                  ),
+                );
+              },
+            );
+          },
+        );
+      },
     );
   }
 
@@ -223,12 +211,13 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
     );
   }
 
-  Widget _buildErrorState() {
+  Widget _buildErrorState(String error) {
     return Container(
       color: Colors.grey[50],
       child: Center(
-        child: FadeTransition(
-          opacity: _fadeAnimation,
+        child: AnimatedOpacity(
+          opacity: 1.0,
+          duration: _animationDuration,
           child: Container(
             margin: const EdgeInsets.all(_spacing),
             padding: const EdgeInsets.all(_spacing),
@@ -269,7 +258,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
                 ),
                 const SizedBox(height: 12),
                 Text(
-                  _error!,
+                  error,
                   textAlign: TextAlign.center,
                   style: TextStyle(
                     color: Colors.grey[600],
@@ -337,13 +326,12 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
     );
   }
 
-  Widget _buildHeader() {
-    final project = _currentProject!;
-
+  Widget _buildHeader(Project project) {
     return Container(
       padding: const EdgeInsets.fromLTRB(_spacing, 30, _spacing, _spacing),
-      child: FadeTransition(
-        opacity: _fadeAnimation,
+      child: AnimatedOpacity(
+        opacity: 1.0,
+        duration: _animationDuration,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -397,29 +385,6 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
                 ),
               ],
             ),
-            // const SizedBox(height: 20),
-            // Container(
-            //   padding: const EdgeInsets.all(16),
-            //   decoration: BoxDecoration(
-            //     color: Colors.white,
-            //     borderRadius: BorderRadius.circular(_borderRadius),
-            //     boxShadow: [
-            //       BoxShadow(
-            //         color: Colors.black.withOpacity(_shadowOpacity),
-            //         blurRadius: 15,
-            //         offset: const Offset(0, 4),
-            //       ),
-            //     ],
-            //   ),
-            //   child: Text(
-            //     project.description,
-            //     style: TextStyle(
-            //       color: Colors.grey[800],
-            //       fontSize: 16,
-            //       height: 1.5,
-            //     ),
-            //   ),
-            // ),
           ],
         ),
       ),
@@ -441,22 +406,25 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
           ),
         ],
       ),
-      child: Row(
-        children: List.generate(_tabs.length, (index) {
-          return Expanded(
-            child: _buildTabItem(index),
+      child: ValueListenableBuilder<String>(
+        valueListenable: _appState.currentTab,
+        builder: (context, currentTab, _) {
+          return Row(
+            children: List.generate(_tabs.length, (index) {
+              final tab = _tabs[index];
+              return Expanded(
+                child: _buildTabItem(tab, currentTab == tab.label),
+              );
+            }),
           );
-        }),
+        },
       ),
     );
   }
 
-  Widget _buildTabItem(int index) {
-    final tab = _tabs[index];
-    final isSelected = _currentIndex == index;
-
+  Widget _buildTabItem(({String label, IconData icon}) tab, bool isSelected) {
     return GestureDetector(
-      onTap: () => _updateTab(index),
+      onTap: () => _updateTab(tab.label),
       child: Container(
         decoration: BoxDecoration(
           color: isSelected ? Colors.teal.shade50 : Colors.transparent,
@@ -495,26 +463,34 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
     );
   }
 
-  Widget _buildContent() {
+  Widget _buildContent(Project project) {
     return Padding(
       padding: const EdgeInsets.all(_spacing),
-      child: FadeTransition(
-        opacity: _fadeAnimation,
-        child: IndexedStack(
-          index: _currentIndex,
-          children: [
-            _buildInfoTab(),
-            SwotAnalysisPage(projectId: _currentProject!.documentId),
-            PestAnalysisPage(projectId: _currentProject!.documentId),
-            ActionPlanPage(projectId: _currentProject!.documentId),
-            MarketingTab(project: _currentProject!),
-          ],
-        ),
+      child: ValueListenableBuilder<String>(
+        valueListenable: _appState.currentTab,
+        builder: (context, currentTab, _) {
+          final index = _tabs.indexWhere((tab) => tab.label == currentTab);
+          
+          return AnimatedOpacity(
+            opacity: 1.0,
+            duration: _animationDuration,
+            child: IndexedStack(
+              index: index >= 0 ? index : 0,
+              children: [
+                _buildInfoTab(project),
+                SwotAnalysisPage(projectId: project.documentId),
+                PestAnalysisPage(projectId: project.documentId),
+                ActionPlanPage(projectId: project.documentId),
+                MarketingTab(project: project),
+              ],
+            ),
+          );
+        },
       ),
     );
   }
 
-  Widget _buildInfoTab() {
+  Widget _buildInfoTab(Project project) {
     return Container(
       decoration: BoxDecoration(
         color: Colors.white,
@@ -531,7 +507,7 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
         padding: EdgeInsets.zero,
         children: [
           _buildInfoHeader(),
-          _buildInfoDetails(),
+          _buildInfoDetails(project),
         ],
       ),
     );
@@ -585,24 +561,24 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
     );
   }
 
-  Widget _buildInfoDetails() {
+  Widget _buildInfoDetails(Project project) {
     return Padding(
       padding: const EdgeInsets.all(_spacing),
       child: Column(
         children: [
           _buildInfoTile(
             'Title',
-            _currentProject!.title,
+            project.title,
             Icons.title,
           ),
           _buildInfoTile(
             'Description',
-            _currentProject!.description,
+            project.description,
             Icons.description_outlined,
           ),
           _buildInfoTile(
             'Created',
-            _formatDate(_currentProject!.createdAt),
+            _formatDate(project.createdAt),
             Icons.calendar_today_outlined,
           ),
         ],
@@ -652,53 +628,4 @@ class _ProjectDetailsPageState extends State<ProjectDetailsPage>
       ),
     );
   }
-}
-
-class BackgroundPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = Colors.teal.shade50.withOpacity(0.3)
-      ..style = PaintingStyle.fill;
-
-    final path = Path()
-      ..moveTo(0, 0)
-      ..lineTo(size.width * 0.7, 0)
-      ..quadraticBezierTo(
-        size.width * 0.8,
-        size.height * 0.2,
-        size.width,
-        size.height * 0.15,
-      )
-      ..lineTo(size.width, 0)
-      ..lineTo(size.width, size.height)
-      ..lineTo(0, size.height)
-      ..lineTo(0, 0)
-      ..close();
-
-    canvas.drawPath(path, paint);
-
-    // Add a second decorative curve
-    final path2 = Path()
-      ..moveTo(size.width, size.height)
-      ..lineTo(size.width * 0.3, size.height)
-      ..quadraticBezierTo(
-        size.width * 0.2,
-        size.height * 0.8,
-        0,
-        size.height * 0.85,
-      )
-      ..lineTo(0, size.height)
-      ..lineTo(size.width, size.height)
-      ..close();
-
-    final paint2 = Paint()
-      ..color = Colors.teal.shade100.withOpacity(0.2)
-      ..style = PaintingStyle.fill;
-
-    canvas.drawPath(path2, paint2);
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }

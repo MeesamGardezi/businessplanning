@@ -1,7 +1,10 @@
+// lib/pages/swot_page.dart
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/swot_models.dart';
 import '../services/swot_service.dart';
-import 'package:flutter/services.dart';
+import '../state/app_state.dart';
+import '../theme.dart';
 
 class SwotAnalysisPage extends StatefulWidget {
   final String projectId;
@@ -40,14 +43,59 @@ const Map<SwotType, ({Color color, IconData icon, String title})> _swotConfig =
 };
 
 class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
+  // Access global app state
+  final AppState _appState = AppState();
+  
+  // Services
   final SwotService _swotService = SwotService();
-  final _searchController = TextEditingController();
-  String _searchQuery = '';
-  bool _isLoading = false;
+  
+  // Local state as ValueNotifiers
+  final ValueNotifier<String> _searchQuery = ValueNotifier<String>('');
+  final ValueNotifier<bool> _isOperationLoading = ValueNotifier<bool>(false);
+  final TextEditingController _searchController = TextEditingController();
 
-  // Design Constants
-  static const double _spacing = 24.0;
-  static const double _borderRadius = 16.0;
+  @override
+  void initState() {
+    super.initState();
+    _setupSearchListener();
+    _loadSwotData();
+  }
+  
+  void _setupSearchListener() {
+    _searchController.addListener(() {
+      _searchQuery.value = _searchController.text;
+    });
+  }
+  
+  void _loadSwotData() {
+    _appState.isSwotLoading.value = true;
+    _appState.swotError.value = null;
+    
+    try {
+      // Set up a stream subscription through the SwotService
+      _swotService.getSwotAnalysis(widget.projectId).listen(
+        (analysis) {
+          _appState.swotAnalysis.value = analysis;
+          _appState.isSwotLoading.value = false;
+        },
+        onError: (error) {
+          _appState.swotError.value = error.toString();
+          _appState.isSwotLoading.value = false;
+        }
+      );
+    } catch (e) {
+      _appState.swotError.value = e.toString();
+      _appState.isSwotLoading.value = false;
+    }
+  }
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    _searchQuery.dispose();
+    _isOperationLoading.dispose();
+    super.dispose();
+  }
 
   void _addNewItem(SwotType type) {
     showDialog(
@@ -55,11 +103,12 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
       barrierDismissible: false, // Prevent clicking outside while processing
       builder: (context) => WillPopScope(
         // Prevent back button while processing
-        onWillPop: () async => !_isLoading,
+        onWillPop: () async => !_isOperationLoading.value,
         child: _AddSwotItemDialog(
           type: type,
           projectId: widget.projectId,
           swotService: _swotService,
+          isLoading: _isOperationLoading,
         ),
       ),
     );
@@ -72,11 +121,14 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
         item: item,
         projectId: widget.projectId,
         swotService: _swotService,
+        isLoading: _isOperationLoading,
       ),
     );
   }
 
   Future<void> _deleteItem(SwotItem item) async {
+    final theme = Theme.of(context);
+    
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -90,7 +142,7 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
           TextButton(
             onPressed: () => Navigator.pop(context, true),
             style: TextButton.styleFrom(
-              foregroundColor: Colors.red,
+              foregroundColor: theme.colorScheme.error,
             ),
             child: const Text('Delete'),
           ),
@@ -99,67 +151,85 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
     );
 
     if (confirmed == true) {
-      setState(() => _isLoading = true);
+      _isOperationLoading.value = true;
       try {
         await _swotService.deleteSwotItem(widget.projectId, item.id);
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Item deleted successfully')),
-        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Item deleted successfully')),
+          );
+        }
       } catch (e) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error deleting item: $e')),
-        );
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Error deleting item: $e')),
+          );
+        }
       } finally {
-        setState(() => _isLoading = false);
+        _isOperationLoading.value = false;
       }
     }
   }
 
   Future<void> _moveItem(SwotItem item, SwotType newType) async {
-    setState(() => _isLoading = true);
+    _isOperationLoading.value = true;
     try {
       await _swotService.moveSwotItem(widget.projectId, item.id, newType);
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error moving item: $e')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error moving item: $e')),
+        );
+      }
     } finally {
-      setState(() => _isLoading = false);
+      _isOperationLoading.value = false;
     }
   }
 
-  List<SwotItem> _filterItems(List<SwotItem> items) {
-    if (_searchQuery.isEmpty) return items;
+  List<SwotItem> _filterItems(List<SwotItem> items, String query) {
+    if (query.isEmpty) return items;
     return items
         .where((item) =>
-            item.text.toLowerCase().contains(_searchQuery.toLowerCase()))
+            item.text.toLowerCase().contains(query.toLowerCase()))
         .toList();
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    
     return Column(
       children: [
-        _buildHeader(),
+        _buildHeader(theme),
         Expanded(
-          child: StreamBuilder<SwotAnalysis>(
-            stream: _swotService.getSwotAnalysis(widget.projectId),
-            builder: (context, snapshot) {
-              if (snapshot.hasError) {
-                return _buildErrorState(snapshot.error.toString());
-              }
-
-              if (!snapshot.hasData && !snapshot.hasError) {
-                return const Center(
-                  child: CircularProgressIndicator(),
+          child: ValueListenableBuilder<bool>(
+            valueListenable: _appState.isSwotLoading,
+            builder: (context, isLoading, _) {
+              if (isLoading) {
+                return Center(
+                  child: CircularProgressIndicator(
+                    valueColor: AlwaysStoppedAnimation<Color>(theme.primaryColor),
+                  ),
                 );
               }
-
-              final analysis = snapshot.data ??
-                  SwotAnalysis(); // Provide empty analysis as fallback
-              return AnimatedSwitcher(
-                duration: const Duration(milliseconds: 300),
-                child: _buildSwotGrid(analysis),
+              
+              return ValueListenableBuilder<String?>(
+                valueListenable: _appState.swotError,
+                builder: (context, error, _) {
+                  if (error != null) {
+                    return _buildErrorState(error, theme);
+                  }
+                  
+                  return ValueListenableBuilder<SwotAnalysis>(
+                    valueListenable: _appState.swotAnalysis,
+                    builder: (context, analysis, _) {
+                      return AnimatedSwitcher(
+                        duration: Duration.zero,
+                        child: _buildSwotGrid(analysis, theme),
+                      );
+                    },
+                  );
+                },
               );
             },
           ),
@@ -168,9 +238,9 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
     );
   }
 
-  Widget _buildHeader() {
+  Widget _buildHeader(ThemeData theme) {
     return Padding(
-      padding: const EdgeInsets.all(_spacing),
+      padding: const EdgeInsets.all(AppTheme.spaceLG),
       child: Row(
         children: [
           Expanded(
@@ -180,80 +250,94 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
                 hintText: 'Search SWOT items...',
                 prefixIcon: const Icon(Icons.search),
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(_borderRadius),
+                  borderRadius: BorderRadius.circular(AppTheme.radiusMD),
                 ),
                 contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 12,
+                  horizontal: AppTheme.spaceMD,
+                  vertical: AppTheme.spaceSM,
                 ),
               ),
-              onChanged: (value) => setState(() => _searchQuery = value),
+              onChanged: (value) => _searchQuery.value = value,
             ),
           ),
-          const SizedBox(width: 16),
-          PopupMenuButton<SwotType>(
-            icon: const Icon(Icons.add_circle_outline),
-            tooltip: 'Add new item',
-            onSelected: _addNewItem,
-            itemBuilder: (context) => SwotType.values
-                .map((type) => PopupMenuItem(
-                      value: type,
-                      child: Row(
-                        children: [
-                          Icon(
-                            _swotConfig[type]!.icon,
-                            color: _swotConfig[type]!.color,
-                            size: 20,
+          const SizedBox(width: AppTheme.spaceMD),
+          ValueListenableBuilder<bool>(
+            valueListenable: _isOperationLoading,
+            builder: (context, isLoading, _) {
+              return PopupMenuButton<SwotType>(
+                enabled: !isLoading,
+                tooltip: 'Add new item',
+                icon: isLoading
+                    ? SizedBox(
+                        width: 24,
+                        height: 24,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(theme.primaryColor),
+                        ),
+                      )
+                    : const Icon(Icons.add_circle_outline),
+                onSelected: _addNewItem,
+                itemBuilder: (context) => SwotType.values
+                    .map((type) => PopupMenuItem(
+                          value: type,
+                          child: Row(
+                            children: [
+                              Icon(
+                                _swotConfig[type]!.icon,
+                                color: _swotConfig[type]!.color,
+                                size: 20,
+                              ),
+                              const SizedBox(width: AppTheme.spaceSM),
+                              Text('Add ${_swotConfig[type]!.title}'),
+                            ],
                           ),
-                          const SizedBox(width: 12),
-                          Text('Add ${_swotConfig[type]!.title}'),
-                        ],
-                      ),
-                    ))
-                .toList(),
+                        ))
+                    .toList(),
+              );
+            }
           ),
         ],
       ),
     );
   }
 
-  Widget _buildSwotGrid(SwotAnalysis analysis) {
-    return GridView.count(
-      padding: const EdgeInsets.all(_spacing),
-      crossAxisCount: 2,
-      crossAxisSpacing: _spacing,
-      mainAxisSpacing: _spacing,
-      children: SwotType.values.map((type) {
-        final items = _filterItems(analysis.getItemsByType(type));
-        return _buildSwotQuadrant(type, items);
-      }).toList(),
+  Widget _buildSwotGrid(SwotAnalysis analysis, ThemeData theme) {
+    return ValueListenableBuilder<String>(
+      valueListenable: _searchQuery,
+      builder: (context, query, _) {
+        return GridView.count(
+          padding: const EdgeInsets.all(AppTheme.spaceLG),
+          crossAxisCount: 2,
+          crossAxisSpacing: AppTheme.spaceLG,
+          mainAxisSpacing: AppTheme.spaceLG,
+          children: SwotType.values.map((type) {
+            final items = _filterItems(analysis.getItemsByType(type), query);
+            return _buildSwotQuadrant(type, items, theme);
+          }).toList(),
+        );
+      },
     );
   }
 
-  Widget _buildSwotQuadrant(SwotType type, List<SwotItem> items) {
+  Widget _buildSwotQuadrant(SwotType type, List<SwotItem> items, ThemeData theme) {
     final config = _swotConfig[type]!;
 
     return Container(
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(_borderRadius),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        color: theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(AppTheme.radiusLG),
+        boxShadow: theme.isDarkMode ? AppTheme.shadowSmallDark : AppTheme.shadowSmall,
       ),
       child: DragTarget<SwotItem>(
         onWillAccept: (item) => item?.type != type,
         onAccept: (item) => _moveItem(item, type),
         builder: (context, candidateData, rejectedData) => Column(
           children: [
-            _buildQuadrantHeader(config, items.length),
+            _buildQuadrantHeader(config, items.length, theme),
             Expanded(
               child: items.isEmpty
-                  ? _buildEmptyState(config)
+                  ? _buildEmptyState(config, theme)
                   : _buildItemsList(items),
             ),
           ],
@@ -265,19 +349,20 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
   Widget _buildQuadrantHeader(
     ({Color color, IconData icon, String title}) config,
     int itemCount,
+    ThemeData theme,
   ) {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(AppTheme.spaceMD),
       decoration: BoxDecoration(
         color: config.color.withOpacity(0.1),
         borderRadius: const BorderRadius.vertical(
-          top: Radius.circular(_borderRadius),
+          top: Radius.circular(AppTheme.radiusLG),
         ),
       ),
       child: Row(
         children: [
           Icon(config.icon, color: config.color),
-          const SizedBox(width: 8),
+          const SizedBox(width: AppTheme.spaceSM),
           Expanded(
             child: Text(
               config.title,
@@ -290,12 +375,12 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
           ),
           Container(
             padding: const EdgeInsets.symmetric(
-              horizontal: 8,
-              vertical: 4,
+              horizontal: AppTheme.spaceSM,
+              vertical: AppTheme.spaceXS,
             ),
             decoration: BoxDecoration(
               color: config.color.withOpacity(0.1),
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(AppTheme.radiusCircular),
             ),
             child: Row(
               mainAxisSize: MainAxisSize.min,
@@ -331,7 +416,10 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
     );
   }
 
-  Widget _buildEmptyState(({Color color, IconData icon, String title}) config) {
+  Widget _buildEmptyState(
+    ({Color color, IconData icon, String title}) config,
+    ThemeData theme,
+  ) {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -341,15 +429,15 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
             size: 48,
             color: config.color.withOpacity(0.3),
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: AppTheme.spaceMD),
           Text(
             'No items yet',
             style: TextStyle(
-              color: Colors.grey[600],
+              color: theme.textSecondaryColor,
               fontSize: 14,
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: AppTheme.spaceSM),
           TextButton.icon(
             onPressed: () => _addNewItem(
               SwotType.values.firstWhere(
@@ -358,6 +446,9 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
             ),
             icon: const Icon(Icons.add, size: 16),
             label: const Text('Add item'),
+            style: TextButton.styleFrom(
+              foregroundColor: config.color,
+            ),
           ),
         ],
       ),
@@ -366,64 +457,77 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
 
   Widget _buildItemsList(List<SwotItem> items) {
     return ListView.builder(
-      padding: const EdgeInsets.all(8),
+      padding: const EdgeInsets.all(AppTheme.spaceSM),
       itemCount: items.length,
       itemBuilder: (context, index) => _buildSwotItem(items[index]),
     );
   }
 
   Widget _buildSwotItem(SwotItem item) {
+    final theme = Theme.of(context);
     final config = _swotConfig[item.type]!;
 
     return Draggable<SwotItem>(
       data: item,
       feedback: Material(
         elevation: 4,
-        borderRadius: BorderRadius.circular(_borderRadius),
+        borderRadius: BorderRadius.circular(AppTheme.radiusMD),
         child: Container(
           width: 200,
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(AppTheme.spaceMD),
           decoration: BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.circular(_borderRadius),
+            color: theme.colorScheme.surface,
+            borderRadius: BorderRadius.circular(AppTheme.radiusMD),
           ),
           child: Text(
             item.text,
             maxLines: 2,
             overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              color: theme.textPrimaryColor,
+            ),
           ),
         ),
       ),
       childWhenDragging: Container(
-        margin: const EdgeInsets.symmetric(vertical: 4),
-        padding: const EdgeInsets.all(16),
+        margin: const EdgeInsets.symmetric(vertical: AppTheme.spaceXS),
+        padding: const EdgeInsets.all(AppTheme.spaceMD),
         decoration: BoxDecoration(
-          color: Colors.grey[100],
-          borderRadius: BorderRadius.circular(_borderRadius),
-          border: Border.all(color: Colors.grey[300]!),
+          color: theme.colorScheme.surfaceVariant,
+          borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+          border: Border.all(color: theme.colorScheme.outline),
         ),
         child: Text(
           item.text,
-          style: TextStyle(color: Colors.grey[400]),
+          style: TextStyle(color: theme.textSecondaryColor),
         ),
       ),
       child: Card(
-        margin: const EdgeInsets.symmetric(vertical: 4),
+        margin: const EdgeInsets.symmetric(vertical: AppTheme.spaceXS),
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(_borderRadius),
+          borderRadius: BorderRadius.circular(AppTheme.radiusMD),
         ),
+        elevation: 0,
         child: ListTile(
           title: Text(item.text),
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               IconButton(
-                icon: const Icon(Icons.edit_outlined, size: 20),
+                icon: Icon(
+                  Icons.edit_outlined, 
+                  size: 20,
+                  color: theme.textSecondaryColor,
+                ),
                 onPressed: () => _editItem(item),
                 tooltip: 'Edit item',
               ),
               IconButton(
-                icon: const Icon(Icons.delete_outlined, size: 20),
+                icon: Icon(
+                  Icons.delete_outlined, 
+                  size: 20,
+                  color: theme.colorScheme.error,
+                ),
                 onPressed: () => _deleteItem(item),
                 tooltip: 'Delete item',
               ),
@@ -434,43 +538,63 @@ class _SwotAnalysisPageState extends State<SwotAnalysisPage> {
     );
   }
 
-  Widget _buildErrorState(String error) {
+  Widget _buildErrorState(String error, ThemeData theme) {
     return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          const Icon(
-            Icons.error_outline,
-            size: 48,
-            color: Colors.red,
-          ),
-          const SizedBox(height: 16),
-          Text(
-            'Error loading SWOT analysis',
-            style: Theme.of(context).textTheme.titleLarge,
-          ),
-          const SizedBox(height: 8),
-          Text(
-            error,
-            style: Theme.of(context).textTheme.bodyMedium,
-            textAlign: TextAlign.center,
-          ),
-        ],
+      child: Padding(
+        padding: const EdgeInsets.all(AppTheme.spaceLG),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.error_outline,
+              size: 48,
+              color: theme.colorScheme.error,
+            ),
+            const SizedBox(height: AppTheme.spaceMD),
+            Text(
+              'Error loading SWOT analysis',
+              style: theme.textTheme.titleLarge?.copyWith(
+                color: theme.textPrimaryColor,
+              ),
+            ),
+            const SizedBox(height: AppTheme.spaceSM),
+            Text(
+              error,
+              style: theme.textTheme.bodyMedium?.copyWith(
+                color: theme.textSecondaryColor,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: AppTheme.spaceLG),
+            ElevatedButton.icon(
+              onPressed: _loadSwotData,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Try Again'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: theme.primaryColor,
+                foregroundColor: theme.colorScheme.onPrimary,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
+// Dialog for adding new SWOT items
 class _AddSwotItemDialog extends StatefulWidget {
   final SwotType type;
   final String projectId;
   final SwotService swotService;
+  final ValueNotifier<bool> isLoading;
 
   const _AddSwotItemDialog({
     Key? key,
     required this.type,
     required this.projectId,
     required this.swotService,
+    required this.isLoading,
   }) : super(key: key);
 
   @override
@@ -479,12 +603,11 @@ class _AddSwotItemDialog extends StatefulWidget {
 
 class _AddSwotItemDialogState extends State<_AddSwotItemDialog> {
   final _textController = TextEditingController();
-  bool _isLoading = false;
 
   Future<void> _submit() async {
     if (_textController.text.isEmpty) return;
 
-    setState(() => _isLoading = true);
+    widget.isLoading.value = true;
     try {
       final newItem = SwotItem(
         id: '',
@@ -501,23 +624,43 @@ class _AddSwotItemDialogState extends State<_AddSwotItemDialog> {
         );
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error adding item: $e')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error adding item: $e')),
+        );
+      }
     } finally {
-      setState(() => _isLoading = false);
+      widget.isLoading.value = false;
     }
   }
 
   @override
+  void dispose() {
+    _textController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final config = _swotConfig[widget.type]!;
+
     return AlertDialog(
-      title: Text('Add ${_swotConfig[widget.type]!.title}'),
+      title: Row(
+        children: [
+          Icon(config.icon, color: config.color, size: 24),
+          const SizedBox(width: AppTheme.spaceSM),
+          Text('Add ${config.title}'),
+        ],
+      ),
       content: TextField(
         controller: _textController,
-        decoration: const InputDecoration(
+        decoration: InputDecoration(
           labelText: 'Description',
           hintText: 'Enter the description...',
+          border: OutlineInputBorder(
+            borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+          ),
         ),
         maxLines: 3,
         autofocus: true,
@@ -527,31 +670,39 @@ class _AddSwotItemDialogState extends State<_AddSwotItemDialog> {
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
-        ElevatedButton(
-          onPressed: _isLoading ? null : _submit,
-          child: _isLoading
-              ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Text('Add'),
+        ValueListenableBuilder<bool>(
+          valueListenable: widget.isLoading,
+          builder: (context, isLoading, _) {
+            return ElevatedButton(
+              onPressed: isLoading ? null : _submit,
+              child: isLoading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Add'),
+            );
+          },
         ),
       ],
     );
   }
 }
 
+// Dialog for editing existing SWOT items
 class _EditSwotItemDialog extends StatefulWidget {
   final SwotItem item;
   final String projectId;
   final SwotService swotService;
+  final ValueNotifier<bool> isLoading;
 
   const _EditSwotItemDialog({
     Key? key,
     required this.item,
     required this.projectId,
     required this.swotService,
+    required this.isLoading,
   }) : super(key: key);
 
   @override
@@ -561,8 +712,7 @@ class _EditSwotItemDialog extends StatefulWidget {
 class _EditSwotItemDialogState extends State<_EditSwotItemDialog> {
   late TextEditingController _textController;
   late SwotType _selectedType;
-  bool _isLoading = false;
-  bool _hasChanges = false;
+  final ValueNotifier<bool> _hasChanges = ValueNotifier<bool>(false);
 
   @override
   void initState() {
@@ -575,24 +725,22 @@ class _EditSwotItemDialogState extends State<_EditSwotItemDialog> {
   @override
   void dispose() {
     _textController.dispose();
+    _hasChanges.dispose();
     super.dispose();
   }
 
   void _checkChanges() {
-    setState(() {
-      _hasChanges = _textController.text != widget.item.text ||
-          _selectedType != widget.item.type;
-    });
+    _hasChanges.value = _textController.text != widget.item.text ||
+        _selectedType != widget.item.type;
   }
 
   Future<void> _submit() async {
-    if (_textController.text.isEmpty) return;
-    if (!_hasChanges) {
+    if (_textController.text.isEmpty || !_hasChanges.value) {
       Navigator.of(context).pop();
       return;
     }
 
-    setState(() => _isLoading = true);
+    widget.isLoading.value = true;
     try {
       final updatedItem = widget.item.copyWith(
         text: _textController.text,
@@ -613,16 +761,20 @@ class _EditSwotItemDialogState extends State<_EditSwotItemDialog> {
         );
       }
     } catch (e) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error updating item: $e')),
-      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error updating item: $e')),
+        );
+      }
     } finally {
-      setState(() => _isLoading = false);
+      widget.isLoading.value = false;
     }
   }
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+
     return AlertDialog(
       title: const Text('Edit Item'),
       content: Column(
@@ -631,19 +783,24 @@ class _EditSwotItemDialogState extends State<_EditSwotItemDialog> {
         children: [
           TextField(
             controller: _textController,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               labelText: 'Description',
               hintText: 'Enter the description...',
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+              ),
             ),
             maxLines: 3,
             autofocus: true,
           ),
-          const SizedBox(height: 16),
+          const SizedBox(height: AppTheme.spaceMD),
           DropdownButtonFormField<SwotType>(
             value: _selectedType,
-            decoration: const InputDecoration(
+            decoration: InputDecoration(
               labelText: 'Category',
-              border: OutlineInputBorder(),
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+              ),
             ),
             items: SwotType.values.map((type) {
               final config = _swotConfig[type]!;
@@ -656,7 +813,7 @@ class _EditSwotItemDialogState extends State<_EditSwotItemDialog> {
                       color: config.color,
                       size: 20,
                     ),
-                    const SizedBox(width: 8),
+                    const SizedBox(width: AppTheme.spaceSM),
                     Text(config.title),
                   ],
                 ),
@@ -664,10 +821,8 @@ class _EditSwotItemDialogState extends State<_EditSwotItemDialog> {
             }).toList(),
             onChanged: (newType) {
               if (newType != null) {
-                setState(() {
-                  _selectedType = newType;
-                  _checkChanges();
-                });
+                _selectedType = newType;
+                _checkChanges();
               }
             },
           ),
@@ -678,15 +833,25 @@ class _EditSwotItemDialogState extends State<_EditSwotItemDialog> {
           onPressed: () => Navigator.of(context).pop(),
           child: const Text('Cancel'),
         ),
-        ElevatedButton(
-          onPressed: _isLoading || !_hasChanges ? null : _submit,
-          child: _isLoading
-              ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Text('Save'),
+        ValueListenableBuilder<bool>(
+          valueListenable: _hasChanges,
+          builder: (context, hasChanges, _) {
+            return ValueListenableBuilder<bool>(
+              valueListenable: widget.isLoading,
+              builder: (context, isLoading, _) {
+                return ElevatedButton(
+                  onPressed: isLoading || !hasChanges ? null : _submit,
+                  child: isLoading
+                      ? const SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Save'),
+                );
+              },
+            );
+          }
         ),
       ],
     );

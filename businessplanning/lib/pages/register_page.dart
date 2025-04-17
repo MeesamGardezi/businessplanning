@@ -1,9 +1,12 @@
+// lib/pages/register_page.dart
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:go_router/go_router.dart';
 import '../services/auth_service.dart';
+import '../state/app_state.dart';
+import '../theme.dart';
 
 class RegisterPage extends StatefulWidget {
   const RegisterPage({Key? key}) : super(key: key);
@@ -12,57 +15,88 @@ class RegisterPage extends StatefulWidget {
   _RegisterPageState createState() => _RegisterPageState();
 }
 
-class _RegisterPageState extends State<RegisterPage>
-    with SingleTickerProviderStateMixin {
+class _RegisterPageState extends State<RegisterPage> {
+  // Access global app state
+  final AppState _appState = AppState();
   final AuthService _auth = AuthService();
+  
+  // Form keys and controllers
   final _formKey = GlobalKey<FormState>();
+  final _emailController = TextEditingController();
+  final _passwordController = TextEditingController();
+  final _confirmPasswordController = TextEditingController();
+  
+  // Focus nodes
   final _emailFocusNode = FocusNode();
   final _passwordFocusNode = FocusNode();
   final _confirmPasswordFocusNode = FocusNode();
-
-  late AnimationController _animationController;
-  late Animation<double> _fadeAnimation;
-
-  String email = '';
-  String password = '';
-  String confirmPassword = '';
-  String error = '';
-  bool isPasswordStep = false;
-  bool isLoading = false;
+  
+  // Local state as ValueNotifiers
+  final ValueNotifier<bool> _isPasswordStep = ValueNotifier<bool>(false);
+  final ValueNotifier<String> _email = ValueNotifier<String>('');
+  final ValueNotifier<String> _password = ValueNotifier<String>('');
+  final ValueNotifier<String> _confirmPassword = ValueNotifier<String>('');
+  final ValueNotifier<bool> _isLoading = ValueNotifier<bool>(false);
+  final ValueNotifier<String?> _errorMessage = ValueNotifier<String?>(null);
 
   @override
   void initState() {
     super.initState();
-    _animationController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 300),
-    );
-    _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
-    );
-    _animationController.forward();
-
+    
+    // Set up controller listeners
+    _emailController.addListener(() {
+      _email.value = _emailController.text;
+    });
+    
+    _passwordController.addListener(() {
+      _password.value = _passwordController.text;
+    });
+    
+    _confirmPasswordController.addListener(() {
+      _confirmPassword.value = _confirmPasswordController.text;
+    });
+    
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      FocusScope.of(context).requestFocus(_emailFocusNode);
+      if (mounted) {
+        FocusScope.of(context).requestFocus(_emailFocusNode);
+      }
     });
   }
 
   @override
   void dispose() {
+    // Dispose controllers
+    _emailController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    
+    // Dispose focus nodes
     _emailFocusNode.dispose();
     _passwordFocusNode.dispose();
     _confirmPasswordFocusNode.dispose();
-    _animationController.dispose();
+    
+    // Dispose ValueNotifiers
+    _isPasswordStep.dispose();
+    _email.dispose();
+    _password.dispose();
+    _confirmPassword.dispose();
+    _isLoading.dispose();
+    _errorMessage.dispose();
+    
     super.dispose();
   }
 
   void _moveToPasswordStep() {
-    setState(() {
-      isPasswordStep = true;
-    });
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      FocusScope.of(context).requestFocus(_passwordFocusNode);
-    });
+    if (!mounted) return;
+    
+    if (_formKey.currentState!.validate()) {
+      _isPasswordStep.value = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) {
+          FocusScope.of(context).requestFocus(_passwordFocusNode);
+        }
+      });
+    }
   }
 
   bool _isPasswordValid(String password) {
@@ -92,43 +126,51 @@ class _RegisterPageState extends State<RegisterPage>
     if (value == null || value.isEmpty) {
       return 'Confirm your password';
     }
-    if (value != password) {
+    if (value != _password.value) {
       return 'Passwords do not match';
     }
     return null;
   }
 
   Future<void> _submitRegistration() async {
+    if (!mounted) return;
+    
     if (_formKey.currentState!.validate()) {
-      setState(() {
-        isLoading = true;
-        error = '';
-      });
+      _isLoading.value = true;
+      _errorMessage.value = null;
 
-      Map<String, dynamic> result =
-          await _auth.registerWithEmailAndPassword(email, password);
+      try {
+        final result = await _auth.registerWithEmailAndPassword(
+          _email.value, 
+          _password.value
+        );
 
-      setState(() {
-        isLoading = false;
-      });
+        if (!mounted) return;
 
-      if (result['success']) {
-        if (mounted) {
+        if (result['success']) {
           context.go('/complete-profile', extra: result['userId']);
+        } else {
+          _errorMessage.value = result['message'] ?? 'Registration failed';
         }
-      } else {
-        setState(() => error = result['message']);
+      } catch (e) {
+        if (mounted) {
+          _errorMessage.value = e.toString();
+        }
+      } finally {
+        if (mounted) {
+          _isLoading.value = false;
+        }
       }
     }
   }
 
   void _handleEnterKey(RawKeyEvent event) {
-    if (event is RawKeyDownEvent &&
+    if (!mounted) return;
+    
+    if (event is RawKeyDownEvent && 
         event.logicalKey == LogicalKeyboardKey.enter) {
-      if (!isPasswordStep) {
-        if (_formKey.currentState!.validate()) {
-          _moveToPasswordStep();
-        }
+      if (!_isPasswordStep.value) {
+        _moveToPasswordStep();
       } else {
         _submitRegistration();
       }
@@ -137,6 +179,8 @@ class _RegisterPageState extends State<RegisterPage>
 
   @override
   Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    
     return Scaffold(
       body: RawKeyboardListener(
         focusNode: FocusNode(),
@@ -155,15 +199,14 @@ class _RegisterPageState extends State<RegisterPage>
           child: Center(
             child: SingleChildScrollView(
               child: Padding(
-                padding: const EdgeInsets.all(24.0),
+                padding: const EdgeInsets.all(AppTheme.spaceLG),
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    // _buildLogo(),
-                    // const SizedBox(height: 40),
-                    FadeTransition(
-                      opacity: _fadeAnimation,
-                      child: _buildRegisterCard(),
+                    AnimatedOpacity(
+                      opacity: 1.0,
+                      duration: Duration.zero,
+                      child: _buildRegisterCard(theme),
                     ),
                   ],
                 ),
@@ -175,55 +218,14 @@ class _RegisterPageState extends State<RegisterPage>
     );
   }
 
-  // Widget _buildLogo() {
-  //   return Column(
-  //     children: [
-  //       Container(
-  //         padding: const EdgeInsets.all(16),
-  //         decoration: BoxDecoration(
-  //           color: Colors.white,
-  //           borderRadius: BorderRadius.circular(20),
-  //           boxShadow: [
-  //             BoxShadow(
-  //               color: Colors.teal.shade200.withOpacity(0.3),
-  //               blurRadius: 20,
-  //               offset: const Offset(0, 4),
-  //             ),
-  //           ],
-  //         ),
-  //         child: Icon(
-  //           Icons.analytics_outlined,
-  //           size: 40,
-  //           color: Colors.teal.shade700,
-  //         ),
-  //       ),
-  //       const SizedBox(height: 16),
-  //       Text(
-  //         'Stratwise',
-  //         style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-  //           color: Colors.teal.shade700,
-  //           fontWeight: FontWeight.bold,
-  //           letterSpacing: -0.5,
-  //         ),
-  //       ),
-  //     ],
-  //   );
-  // }
-
-  Widget _buildRegisterCard() {
+  Widget _buildRegisterCard(ThemeData theme) {
     return Container(
       width: 400,
-      padding: const EdgeInsets.all(32),
+      padding: const EdgeInsets.all(AppTheme.spaceXL),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(24),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.08),
-            blurRadius: 20,
-            offset: const Offset(0, 4),
-          ),
-        ],
+        color: theme.colorScheme.surface,
+        borderRadius: BorderRadius.circular(AppTheme.radiusXL),
+        boxShadow: theme.isDarkMode ? AppTheme.shadowMediumDark : AppTheme.shadowMedium,
       ),
       child: Form(
         key: _formKey,
@@ -231,153 +233,224 @@ class _RegisterPageState extends State<RegisterPage>
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (!kIsWeb && (isPasswordStep)) _buildBackButton(),
-            Text(
-              isPasswordStep ? 'Create a password' : 'Create your account',
-              style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+            ValueListenableBuilder<bool>(
+              valueListenable: _isPasswordStep,
+              builder: (context, isPasswordStep, _) {
+                if (!kIsWeb && isPasswordStep) {
+                  return _buildBackButton(theme);
+                }
+                return const SizedBox.shrink();
+              },
+            ),
+            ValueListenableBuilder<bool>(
+              valueListenable: _isPasswordStep,
+              builder: (context, isPasswordStep, _) {
+                return Text(
+                  isPasswordStep ? 'Create a password' : 'Create your account',
+                  style: theme.textTheme.headlineSmall?.copyWith(
                     fontWeight: FontWeight.bold,
-                    color: Colors.grey[800],
+                    color: theme.textPrimaryColor,
                   ),
+                );
+              },
             ),
-            const SizedBox(height: 8),
-            Text(
-              isPasswordStep
-                  ? 'Choose a secure password for your account'
-                  : 'Start planning your business strategy',
-              style: Theme.of(context).textTheme.bodyLarge?.copyWith(
-                    color: Colors.grey[600],
+            const SizedBox(height: AppTheme.spaceSM),
+            ValueListenableBuilder<bool>(
+              valueListenable: _isPasswordStep,
+              builder: (context, isPasswordStep, _) {
+                return Text(
+                  isPasswordStep
+                    ? 'Choose a secure password for your account'
+                    : 'Start planning your business strategy',
+                  style: theme.textTheme.bodyLarge?.copyWith(
+                    color: theme.textSecondaryColor,
                   ),
+                );
+              },
             ),
-            const SizedBox(height: 32),
-            _buildFormFields(),
-            const SizedBox(height: 24),
-            if (!isPasswordStep) _buildLoginLink(),
-            const SizedBox(height: 24),
-            _buildActionButton(),
-            if (error.isNotEmpty) _buildErrorMessage(),
+            const SizedBox(height: AppTheme.spaceXL),
+            _buildFormFields(theme),
+            const SizedBox(height: AppTheme.spaceLG),
+            ValueListenableBuilder<bool>(
+              valueListenable: _isPasswordStep,
+              builder: (context, isPasswordStep, _) {
+                if (!isPasswordStep) {
+                  return _buildLoginLink(theme);
+                }
+                return const SizedBox.shrink();
+              },
+            ),
+            const SizedBox(height: AppTheme.spaceLG),
+            _buildActionButton(theme),
+            ValueListenableBuilder<String?>(
+              valueListenable: _errorMessage,
+              builder: (context, error, _) {
+                if (error != null && error.isNotEmpty) {
+                  return _buildErrorMessage(error, theme);
+                }
+                return const SizedBox.shrink();
+              },
+            ),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildBackButton() {
+  Widget _buildBackButton(ThemeData theme) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 24),
+      padding: const EdgeInsets.only(bottom: AppTheme.spaceLG),
       child: IconButton(
-        icon: Icon(Icons.arrow_back, color: Colors.grey[700]),
+        icon: Icon(
+          Icons.arrow_back, 
+          color: theme.textSecondaryColor,
+        ),
         padding: EdgeInsets.zero,
         constraints: const BoxConstraints(),
-        onPressed: isPasswordStep
-            ? () {
-                setState(() {
-                  isPasswordStep = false;
-                  _emailFocusNode.requestFocus();
-                });
-              }
-            : () => context.go('/login'),
+        onPressed: () {
+          _isPasswordStep.value = false;
+          if (mounted) {
+            _emailFocusNode.requestFocus();
+          }
+        },
       ),
     );
   }
 
-  Widget _buildFormFields() {
-    if (!isPasswordStep) {
-      return TextFormField(
-        focusNode: _emailFocusNode,
-        autofocus: true,
-        decoration: InputDecoration(
-          labelText: 'Email',
-          hintText: 'Enter your business email',
-          prefixIcon: Icon(Icons.email_outlined, color: Colors.grey[600]),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide(color: Colors.grey[300]!),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide(color: Colors.teal.shade700, width: 2),
-          ),
-        ),
-        validator: (val) => val!.isEmpty ? 'Enter an email' : null,
-        onChanged: (val) => setState(() => email = val),
-        onFieldSubmitted: (_) => _moveToPasswordStep(),
-      );
-    } else {
-      return Column(
-        children: [
-          TextFormField(
-            focusNode: _passwordFocusNode,
+  Widget _buildFormFields(ThemeData theme) {
+    return ValueListenableBuilder<bool>(
+      valueListenable: _isPasswordStep,
+      builder: (context, isPasswordStep, _) {
+        if (!isPasswordStep) {
+          // Email step
+          return TextFormField(
+            controller: _emailController,
+            focusNode: _emailFocusNode,
             autofocus: true,
-            obscureText: true,
             decoration: InputDecoration(
-              labelText: 'Password',
-              hintText: 'Create a strong password',
-              prefixIcon: Icon(Icons.lock_outline, color: Colors.grey[600]),
+              labelText: 'Email',
+              hintText: 'Enter your business email',
+              prefixIcon: Icon(
+                Icons.email_outlined, 
+                color: theme.textSecondaryColor,
+              ),
               border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(AppTheme.radiusMD),
               ),
               enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.grey[300]!),
+                borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+                borderSide: BorderSide(color: theme.colorScheme.outline),
               ),
               focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.teal.shade700, width: 2),
+                borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+                borderSide: BorderSide(color: theme.primaryColor, width: 2),
               ),
             ),
-            validator: _validatePassword,
-            onChanged: (val) => setState(() => password = val),
-            onFieldSubmitted: (_) =>
-                FocusScope.of(context).requestFocus(_confirmPasswordFocusNode),
-          ),
-          const SizedBox(height: 16),
-          TextFormField(
-            focusNode: _confirmPasswordFocusNode,
-            obscureText: true,
-            decoration: InputDecoration(
-              labelText: 'Confirm Password',
-              hintText: 'Confirm your password',
-              prefixIcon: Icon(Icons.lock_outline, color: Colors.grey[600]),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
+            validator: (val) => val!.isEmpty ? 'Enter an email' : null,
+            onFieldSubmitted: (_) => _moveToPasswordStep(),
+          );
+        } else {
+          // Password step
+          return Column(
+            children: [
+              ValueListenableBuilder<String>(
+                valueListenable: _password,
+                builder: (context, password, _) {
+                  return TextFormField(
+                    controller: _passwordController,
+                    focusNode: _passwordFocusNode,
+                    autofocus: true,
+                    obscureText: true,
+                    decoration: InputDecoration(
+                      labelText: 'Password',
+                      hintText: 'Create a strong password',
+                      prefixIcon: Icon(
+                        Icons.lock_outline, 
+                        color: theme.textSecondaryColor,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+                        borderSide: BorderSide(color: theme.colorScheme.outline),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+                        borderSide: BorderSide(color: theme.primaryColor, width: 2),
+                      ),
+                    ),
+                    validator: _validatePassword,
+                    onFieldSubmitted: (_) {
+                      if (mounted) {
+                        FocusScope.of(context).requestFocus(_confirmPasswordFocusNode);
+                      }
+                    },
+                  );
+                },
               ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.grey[300]!),
+              const SizedBox(height: AppTheme.spaceMD),
+              ValueListenableBuilder<String>(
+                valueListenable: _confirmPassword,
+                builder: (context, confirmPassword, _) {
+                  return TextFormField(
+                    controller: _confirmPasswordController,
+                    focusNode: _confirmPasswordFocusNode,
+                    obscureText: true,
+                    decoration: InputDecoration(
+                      labelText: 'Confirm Password',
+                      hintText: 'Confirm your password',
+                      prefixIcon: Icon(
+                        Icons.lock_outline, 
+                        color: theme.textSecondaryColor,
+                      ),
+                      border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+                      ),
+                      enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+                        borderSide: BorderSide(color: theme.colorScheme.outline),
+                      ),
+                      focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+                        borderSide: BorderSide(color: theme.primaryColor, width: 2),
+                      ),
+                    ),
+                    validator: _validateConfirmPassword,
+                    onFieldSubmitted: (_) => _submitRegistration(),
+                  );
+                },
               ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: Colors.teal.shade700, width: 2),
-              ),
-            ),
-            validator: _validateConfirmPassword,
-            onChanged: (val) => setState(() => confirmPassword = val),
-            onFieldSubmitted: (_) => _submitRegistration(),
-          ),
-        ],
-      );
-    }
+            ],
+          );
+        }
+      },
+    );
   }
 
-  Widget _buildLoginLink() {
+  Widget _buildLoginLink(ThemeData theme) {
     return Align(
       alignment: Alignment.centerLeft,
       child: RichText(
         text: TextSpan(
-          style: TextStyle(fontSize: 14, color: Colors.grey[700]),
+          style: TextStyle(
+            fontSize: 14, 
+            color: theme.textSecondaryColor,
+          ),
           children: [
             const TextSpan(text: 'Already have an account? '),
             TextSpan(
               text: 'Sign in',
               style: TextStyle(
-                color: Colors.teal.shade700,
+                color: theme.primaryColor,
                 fontWeight: FontWeight.w600,
               ),
               recognizer: TapGestureRecognizer()
-                ..onTap = () => context.go('/login'),
+                ..onTap = () {
+                  if (mounted) {
+                    context.go('/login');
+                  }
+                },
             ),
           ],
         ),
@@ -385,62 +458,77 @@ class _RegisterPageState extends State<RegisterPage>
     );
   }
 
-  Widget _buildActionButton() {
+  Widget _buildActionButton(ThemeData theme) {
     return SizedBox(
       width: double.infinity,
-      child: isLoading
-          ? Center(
+      child: ValueListenableBuilder<bool>(
+        valueListenable: _isLoading,
+        builder: (context, isLoading, _) {
+          if (isLoading) {
+            return Center(
               child: CircularProgressIndicator(
-                valueColor: AlwaysStoppedAnimation<Color>(Colors.teal.shade700),
+                valueColor: AlwaysStoppedAnimation<Color>(theme.primaryColor),
               ),
-            )
-          : ElevatedButton(
-              onPressed: () {
-                if (_formKey.currentState!.validate()) {
+            );
+          }
+          
+          return ValueListenableBuilder<bool>(
+            valueListenable: _isPasswordStep,
+            builder: (context, isPasswordStep, _) {
+              return ElevatedButton(
+                onPressed: () {
                   if (!isPasswordStep) {
                     _moveToPasswordStep();
                   } else {
                     _submitRegistration();
                   }
-                }
-              },
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.teal.shade700,
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: theme.primaryColor,
+                  foregroundColor: theme.colorScheme.onPrimary,
+                  padding: const EdgeInsets.symmetric(vertical: AppTheme.spaceMD),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(AppTheme.radiusMD),
+                  ),
                 ),
-              ),
-              child: Text(
-                isPasswordStep ? 'Create account' : 'Continue',
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w600,
+                child: Text(
+                  isPasswordStep ? 'Create account' : 'Continue',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                  ),
                 ),
-              ),
-            ),
+              );
+            },
+          );
+        },
+      ),
     );
   }
 
-  Widget _buildErrorMessage() {
+  Widget _buildErrorMessage(String error, ThemeData theme) {
     return Padding(
-      padding: const EdgeInsets.only(top: 16),
+      padding: const EdgeInsets.only(top: AppTheme.spaceMD),
       child: Container(
-        padding: const EdgeInsets.all(12),
+        padding: const EdgeInsets.all(AppTheme.spaceMD),
         decoration: BoxDecoration(
-          color: Colors.red[50],
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: Colors.red[100]!),
+          color: theme.colorScheme.errorContainer,
+          borderRadius: BorderRadius.circular(AppTheme.radiusSM),
+          border: Border.all(color: theme.colorScheme.error.withOpacity(0.3)),
         ),
         child: Row(
           children: [
-            Icon(Icons.error_outline, size: 20, color: Colors.red[700]),
-            const SizedBox(width: 12),
+            Icon(
+              Icons.error_outline, 
+              size: 20, 
+              color: theme.colorScheme.error,
+            ),
+            const SizedBox(width: AppTheme.spaceMD),
             Expanded(
               child: Text(
                 error,
                 style: TextStyle(
-                  color: Colors.red[700],
+                  color: theme.colorScheme.error,
                   fontSize: 14,
                 ),
               ),
