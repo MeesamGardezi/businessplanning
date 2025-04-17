@@ -1,33 +1,38 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+// lib/services/project_service.dart
+import 'dart:async';
+import '../config/api_config.dart';
 import '../models/project_model.dart';
-import 'auth_service.dart';
+import 'api_client.dart';
 
 class ProjectService {
-  final FirebaseFirestore _firestore;
-  late final CollectionReference _usersCollection;
-
-  ProjectService() : _firestore = FirebaseFirestore.instance {
-    _usersCollection = _firestore.collection('users');
-    print('ProjectService initialized with Firestore instance.');
-  }
+  final ApiClient _apiClient = ApiClient(baseUrl: ApiConfig.baseUrl);
 
   // Create a new project for the current user
   Future<Project?> createProject(Project project) async {
     try {
       print('Attempting to create a project: ${project.toString()}');
-      String? userId = await AuthService().getCurrentUserId();
-      print('Current user ID: $userId');
-
-      if (userId == null) {
-        print('User ID is null, user might not be logged in.');
-        return null;
-      }
-
-      CollectionReference projectsCollection = _usersCollection.doc(userId).collection('projects');
       
-      DocumentReference docRef = await projectsCollection.add(project.toFirestore());
-      print('Project created with ID: ${docRef.id}');
-      return project.copyWith(documentId: docRef.id);
+      final response = await _apiClient.post(
+        '/projects',
+        {
+          'title': project.title,
+          'description': project.description
+        }
+      );
+      
+      if (response['success']) {
+        final projectData = response['data'];
+        print('Project created with ID: ${projectData['id']}');
+        
+        return Project(
+          documentId: projectData['id'],
+          title: projectData['title'],
+          description: projectData['description'],
+          createdAt: DateTime.parse(projectData['createdAt'])
+        );
+      }
+      
+      return null;
     } catch (e) {
       print('Error creating project: $e');
       return null;
@@ -36,76 +41,113 @@ class ProjectService {
 
   // Get all projects for the current user
   Stream<List<Project>> getProjects() async* {
-    String? userId = await AuthService().getCurrentUserId();
-    print('Fetching projects for user ID: $userId');
-
-    if (userId == null) {
-      print('User ID is null, cannot fetch projects.');
-      yield [];
-      return;
+    StreamController<List<Project>> controller = StreamController<List<Project>>();
+    
+    try {
+      // Setup periodic refresh of data
+      Timer.periodic(Duration(seconds: 30), (timer) async {
+        if (controller.isClosed) {
+          timer.cancel();
+          return;
+        }
+        
+        try {
+          final projects = await _fetchProjects();
+          controller.add(projects);
+        } catch (e) {
+          print('Error refreshing projects: $e');
+          // Only add error if controller is still open
+          if (!controller.isClosed) {
+            controller.addError(e);
+          }
+        }
+      });
+      
+      // Initial fetch
+      final initialProjects = await _fetchProjects();
+      controller.add(initialProjects);
+      
+      // Handle cleanup when the stream is cancelled
+      yield* controller.stream;
+    } finally {
+      await controller.close();
     }
-
-    CollectionReference projectsCollection = _usersCollection.doc(userId).collection('projects');
-
-    yield* projectsCollection.orderBy('createdAt', descending: true).snapshots().map((snapshot) {
-      print('Projects snapshot received: ${snapshot.docs.length} documents found.');
-      return snapshot.docs.map((doc) {
-        print('Project document ID: ${doc.id}');
-        return Project.fromFirestore(doc);
-      }).toList();
-    });
+  }
+  
+  Future<List<Project>> _fetchProjects() async {
+    try {
+      final response = await _apiClient.get('/projects');
+      
+      if (response['success'] && response['data']['projects'] != null) {
+        return (response['data']['projects'] as List)
+            .map((projectData) => Project(
+                documentId: projectData['id'],
+                title: projectData['title'] ?? '',
+                description: projectData['description'] ?? '',
+                createdAt: DateTime.parse(projectData['createdAt'])
+            ))
+            .toList();
+      }
+      
+      return [];
+    } catch (e) {
+      print('Error fetching projects: $e');
+      throw e;
+    }
   }
 
   // Get a stream of a single project by ID
   Stream<Project?> getProjectStream(String projectId) async* {
-    String? userId = await AuthService().getCurrentUserId();
-    print('Setting up stream for project ID: $projectId, user ID: $userId');
-
-    if (userId == null) {
-      print('User ID is null, cannot fetch project stream.');
-      yield null;
-      return;
+    StreamController<Project?> controller = StreamController<Project?>();
+    
+    try {
+      // Setup periodic refresh of data
+      Timer.periodic(Duration(seconds: 30), (timer) async {
+        if (controller.isClosed) {
+          timer.cancel();
+          return;
+        }
+        
+        try {
+          final project = await getProjectById(projectId);
+          controller.add(project);
+        } catch (e) {
+          print('Error refreshing project: $e');
+          // Only add error if controller is still open
+          if (!controller.isClosed) {
+            controller.addError(e);
+          }
+        }
+      });
+      
+      // Initial fetch
+      final initialProject = await getProjectById(projectId);
+      controller.add(initialProject);
+      
+      // Handle cleanup when the stream is cancelled
+      yield* controller.stream;
+    } finally {
+      await controller.close();
     }
-
-    yield* _usersCollection
-        .doc(userId)
-        .collection('projects')
-        .doc(projectId)
-        .snapshots()
-        .map((doc) {
-      if (!doc.exists) {
-        print('Project document does not exist: $projectId');
-        return null;
-      }
-      print('Project document updated: ${doc.data()}');
-      return Project.fromFirestore(doc);
-    });
   }
 
   // Get a single project by ID
   Future<Project?> getProjectById(String projectId) async {
-    String? userId = await AuthService().getCurrentUserId();
-    print('Fetching project with ID: $projectId for user ID: $userId');
-
-    if (userId == null) {
-      print('User ID is null, cannot fetch project.');
-      return null;
-    }
-
     try {
-      DocumentSnapshot doc = await _usersCollection
-          .doc(userId)
-          .collection('projects')
-          .doc(projectId)
-          .get();
-          
-      if (doc.exists) {
-        print('Project found: ${doc.data()}');
-        return Project.fromFirestore(doc);
-      } else {
-        print('Project not found for ID: $projectId');
-        return null;
+      final response = await _apiClient.get('/projects/$projectId');
+      
+      if (response['success'] && response['data'] != null) {
+        final projectData = response['data'];
+        
+        return Project(
+          documentId: projectData['id'],
+          title: projectData['title'] ?? '',
+          description: projectData['description'] ?? '',
+          createdAt: DateTime.parse(projectData['createdAt'])
+        );
       }
+      
+      return null;
     } catch (e) {
       print('Error getting project: $e');
       return null;
@@ -114,22 +156,16 @@ class ProjectService {
 
   // Update an existing project
   Future<bool> updateProject(Project project) async {
-    String? userId = await AuthService().getCurrentUserId();
-    print('Updating project with ID: ${project.documentId} for user ID: $userId');
-
-    if (userId == null) {
-      print('User ID is null, cannot update project.');
-      return false;
-    }
-
     try {
-      await _usersCollection
-          .doc(userId)
-          .collection('projects')
-          .doc(project.documentId)
-          .update(project.toFirestore());
-      print('Project updated successfully: ${project.documentId}');
-      return true;
+      final response = await _apiClient.put(
+        '/projects/${project.documentId}',
+        {
+          'title': project.title,
+          'description': project.description
+        }
+      );
+      
+      return response['success'] ?? false;
     } catch (e) {
       print('Error updating project: $e');
       return false;
@@ -138,22 +174,9 @@ class ProjectService {
 
   // Delete a project
   Future<bool> deleteProject(String projectId) async {
-    String? userId = await AuthService().getCurrentUserId();
-    print('Deleting project with ID: $projectId for user ID: $userId');
-
-    if (userId == null) {
-      print('User ID is null, cannot delete project.');
-      return false;
-    }
-
     try {
-      await _usersCollection
-          .doc(userId)
-          .collection('projects')
-          .doc(projectId)
-          .delete();
-      print('Project deleted successfully: $projectId');
-      return true;
+      final response = await _apiClient.delete('/projects/$projectId');
+      return response['success'] ?? false;
     } catch (e) {
       print('Error deleting project: $e');
       return false;

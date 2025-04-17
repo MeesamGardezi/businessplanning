@@ -1,9 +1,10 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+// lib/services/auth_service.dart
 import 'package:shared_preferences/shared_preferences.dart';
-import 'dart:convert';
+import '../config/api_config.dart';
+import 'api_client.dart';
 
 class AuthService {
-  final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final ApiClient _apiClient = ApiClient(baseUrl: ApiConfig.baseUrl);
 
   // Cache variables
   dynamic _cachedUser;
@@ -11,12 +12,6 @@ class AuthService {
   String? _cachedUserId;
   DateTime? _lastCacheUpdate;
   static const cacheDuration = Duration(minutes: 5);
-
-  String _simpleHash(String input) {
-    var bytes = utf8.encode(input);
-    var base64 = base64Encode(bytes);
-    return base64;
-  }
 
   void _clearCache() {
     _cachedUser = null;
@@ -32,29 +27,41 @@ class AuthService {
 
   Future<bool> isLoggedIn() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString('user_email') != null;
+    return prefs.getString('access_token') != null;
   }
 
-  Future<void> setLoggedIn(String email) async {
+  Future<void> setLoggedIn(Map<String, dynamic> authData) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('user_email', email);
+    
+    await prefs.setString('access_token', authData['accessToken']);
+    await prefs.setString('refresh_token', authData['refreshToken']);
+    
+    if (authData['user'] != null && authData['user']['email'] != null) {
+      await prefs.setString('user_email', authData['user']['email']);
+    }
+    
     _clearCache();
   }
 
   Future<void> setLoggedOut() async {
     final prefs = await SharedPreferences.getInstance();
+    
+    await prefs.remove('access_token');
+    await prefs.remove('refresh_token');
     await prefs.remove('user_email');
+    
     _clearCache();
   }
 
   Future<bool> checkEmailExists(String email) async {
     try {
-      var userSnapshot = await _firestore
-          .collection('users')
-          .where('email', isEqualTo: email)
-          .get();
-
-      return userSnapshot.docs.isNotEmpty;
+      final response = await _apiClient.post(
+        '/auth/check-email',
+        {'email': email},
+        requiresAuth: false
+      );
+      
+      return response['data']['exists'] ?? false;
     } catch (e) {
       print('Error checking email existence: $e');
       return false;
@@ -64,22 +71,21 @@ class AuthService {
   Future<Map<String, dynamic>> signInWithEmailAndPassword(
       String email, String password) async {
     try {
-      String hashedPassword = _simpleHash(password);
-
-      var userSnapshot = await _firestore
-          .collection('users')
-          .where('email', isEqualTo: email)
-          .get();
-
-      if (userSnapshot.docs.isNotEmpty) {
-        var userData = userSnapshot.docs.first.data();
-        if (userData['password'] == hashedPassword) {
-          await setLoggedIn(email);
-          return {'success': true, 'redirectTo': '/dashboard'};
-        }
+      final response = await _apiClient.post(
+        '/auth/login',
+        {
+          'email': email,
+          'password': password
+        },
+        requiresAuth: false
+      );
+      
+      if (response['success']) {
+        await setLoggedIn(response['data']);
+        return {'success': true, 'redirectTo': '/dashboard'};
       }
-
-      return {'success': false, 'message': 'Invalid email or password'};
+      
+      return {'success': false, 'message': response['message'] ?? 'Login failed'};
     } catch (e) {
       print('Error signing in: $e');
       return {'success': false, 'message': 'An error occurred during sign in'};
@@ -89,29 +95,32 @@ class AuthService {
   Future<Map<String, dynamic>> registerWithEmailAndPassword(
       String email, String password) async {
     try {
-      if (await checkEmailExists(email)) {
-        return {'success': false, 'message': 'Email already in use'};
+      final response = await _apiClient.post(
+        '/auth/register',
+        {
+          'email': email,
+          'password': password
+        },
+        requiresAuth: false
+      );
+      
+      if (response['success']) {
+        await setLoggedIn({
+          'accessToken': response['data']['accessToken'],
+          'refreshToken': response['data']['refreshToken'],
+          'user': {'email': email}
+        });
+        
+        return {
+          'success': true,
+          'message': response['message'] ?? 'Registration successful',
+          'userId': response['data']['uid']
+        };
       }
-
-      String hashedPassword = _simpleHash(password);
-      DocumentReference docRef = await _firestore.collection('users').add({
-        'email': email,
-        'password': hashedPassword,
-        'status': 'complete',
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      await _firestore.collection('users').doc(docRef.id).update({
-        'id':docRef.id
-      });
-
-      // Store the user ID in the cached user data
-      _cachedUser = {'id': docRef.id, 'email': email, 'status': 'complete'};
-      await setLoggedIn(email);
+      
       return {
-        'success': true,
-        'message': 'Registration successful',
-        'userId': docRef.id
+        'success': false,
+        'message': response['message'] ?? 'Registration failed'
       };
     } catch (e) {
       print('Error registering user: $e');
@@ -123,8 +132,18 @@ class AuthService {
   }
 
   Future<void> signOut() async {
-    await setLoggedOut();
-    _clearCache();
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final refreshToken = prefs.getString('refresh_token');
+      
+      if (refreshToken != null) {
+        await _apiClient.post('/auth/logout', {'refreshToken': refreshToken});
+      }
+    } catch (e) {
+      print('Error during logout: $e');
+    } finally {
+      await setLoggedOut();
+    }
   }
 
   Future<dynamic> getCurrentUser() async {
@@ -132,18 +151,11 @@ class AuthService {
       return _cachedUser;
     }
 
-    final prefs = await SharedPreferences.getInstance();
-    final email = prefs.getString('user_email');
-    if (email == null) return null;
-
     try {
-      var userSnapshot = await _firestore
-          .collection('users')
-          .where('email', isEqualTo: email)
-          .get();
-
-      if (userSnapshot.docs.isNotEmpty) {
-        _cachedUser = userSnapshot.docs.first.data();
+      final response = await _apiClient.get('/auth/me');
+      
+      if (response['success']) {
+        _cachedUser = response['data'];
         _lastCacheUpdate = DateTime.now();
         return _cachedUser;
       }
@@ -176,28 +188,23 @@ class AuthService {
     }
 
     final user = await getCurrentUser();
-    _cachedUserId = user?['id'] ??
-        user?[
-            'email']; // Use email or another identifier if 'id' is not available
+    _cachedUserId = user?['id'] ?? user?['email'];
     return _cachedUserId;
   }
 
   Future<bool> setEmployeePassword(String email, String password) async {
     try {
-      String hashedPassword = _simpleHash(password);
-      var userSnapshot = await _firestore
-          .collection('users')
-          .where('email', isEqualTo: email)
-          .get();
-
-      if (userSnapshot.docs.isNotEmpty) {
-        await userSnapshot.docs.first.reference
-            .update({'password': hashedPassword});
-        _clearCache();
-        return true;
-      }
-
-      return false;
+      final response = await _apiClient.post(
+        '/auth/set-password',
+        {
+          'email': email,
+          'password': password
+        },
+        requiresAuth: false
+      );
+      
+      _clearCache();
+      return response['success'] ?? false;
     } catch (e) {
       print('Error setting employee password: $e');
       return false;

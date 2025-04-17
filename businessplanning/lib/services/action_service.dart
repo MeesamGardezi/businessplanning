@@ -1,257 +1,287 @@
+// lib/services/action_service.dart
 import 'dart:async';
-import 'package:cloud_firestore/cloud_firestore.dart';
+import '../config/api_config.dart';
 import '../models/action_model.dart';
-import 'auth_service.dart';
+import 'api_client.dart';
 
 class ActionPlanService {
-  static const int _maxRetries = 3;
-  static const Duration _retryDelay = Duration(seconds: 1);
-  
-  final FirebaseFirestore _firestore;
-  final AuthService _authService;
+  final ApiClient _apiClient = ApiClient(baseUrl: ApiConfig.baseUrl);
   final Map<String, List<ActionItem>> _cache = {};
   final StreamController<Map<String, List<ActionItem>>> _cacheController = 
     StreamController<Map<String, List<ActionItem>>>.broadcast();
 
-  ActionPlanService({
-    FirebaseFirestore? firestore,
-    AuthService? authService,
-  })  : _firestore = firestore ?? FirebaseFirestore.instance,
-        _authService = authService ?? AuthService();
+  ActionPlanService();
 
   void dispose() {
     _cacheController.close();
   }
 
-  CollectionReference _getActionItemsCollection(String userId, String projectId) =>
-    _firestore
-      .collection('users')
-      .doc(userId)
-      .collection('projects')
-      .doc(projectId)
-      .collection('action_items');
-
-  Future<String> _getNextId(String projectId) async {
-    String? userId = await _authService.getCurrentUserId();
-    if (userId == null) throw const ActionPlanException('User not authenticated');
-
-    final collection = _getActionItemsCollection(userId, projectId);
-    final querySnapshot = await collection
-        .orderBy('id', descending: true)
-        .limit(1)
-        .get();
-
-    if (querySnapshot.docs.isEmpty) return '1';
-
-    final lastDoc = querySnapshot.docs.first.data() as Map<String, dynamic>;
-    final lastId = int.parse(lastDoc['id'].toString());
-    return (lastId + 1).toString();
-  }
-
-  Future<T> _withRetry<T>(Future<T> Function() operation) async {
-    Exception? lastError;
-    
-    for (int i = 0; i < _maxRetries; i++) {
-      try {
-        return await operation();
-      } on Exception catch (e) {
-        lastError = e;
-        if (i < _maxRetries - 1) {
-          await Future.delayed(_retryDelay * (i + 1));
-        }
-      }
-    }
-    
-    throw lastError ?? const ActionPlanException('Operation failed after retries');
-  }
-
-  Stream<List<ActionItem>> getActionItems(String projectId) async* {
-    String? userId = await _authService.getCurrentUserId();
-    if (userId == null) {
-      yield [];
-      return;
-    }
-
-    // Check cache first
-    if (_cache.containsKey(projectId)) {
-      yield _cache[projectId]!;
-    }
-
-    yield* _getActionItemsCollection(userId, projectId)
-      .orderBy('id')
-      .snapshots()
-      .map((snapshot) {
-        final items = snapshot.docs
-          .map((doc) => ActionItem.fromFirestore(doc))
-          .toList()
-          ..sort();
-        
+  Future<List<ActionItem>> _fetchActionItems(String projectId) async {
+    try {
+      final response = await _apiClient.get('/projects/$projectId/actions');
+      
+      if (response['success'] && response['data']['items'] != null) {
+        final items = (response['data']['items'] as List)
+            .map((itemData) => ActionItem(
+                id: itemData['id'],
+                task: itemData['task'] ?? '',
+                responsible: itemData['responsible'] ?? '',
+                completionDate: itemData['completionDate'] != null 
+                    ? DateTime.parse(itemData['completionDate']) 
+                    : null,
+                update: itemData['update'] ?? '',
+                createdAt: DateTime.parse(itemData['createdAt']),
+                updatedAt: itemData['updatedAt'] != null 
+                    ? DateTime.parse(itemData['updatedAt']) 
+                    : null,
+                status: _parseStatus(itemData['status'])
+            ))
+            .toList()
+            ..sort();
+            
         // Update cache
         _cache[projectId] = items;
         _cacheController.add(_cache);
         
         return items;
+      }
+      
+      return [];
+    } catch (e) {
+      print('Error fetching action items: $e');
+      throw e;
+    }
+  }
+  
+  TaskStatus _parseStatus(dynamic status) {
+    if (status == 'inProgress') return TaskStatus.inProgress;
+    if (status == 'complete') return TaskStatus.complete;
+    return TaskStatus.incomplete;
+  }
+  
+  String _serializeStatus(TaskStatus status) {
+    switch (status) {
+      case TaskStatus.inProgress: return 'inProgress';
+      case TaskStatus.complete: return 'complete';
+      default: return 'incomplete';
+    }
+  }
+
+  Stream<List<ActionItem>> getActionItems(String projectId) async* {
+    StreamController<List<ActionItem>> controller = StreamController<List<ActionItem>>();
+    
+    try {
+      // Check cache first
+      if (_cache.containsKey(projectId)) {
+        controller.add(_cache[projectId]!);
+      }
+      
+      // Setup periodic refresh of data
+      Timer.periodic(Duration(seconds: 30), (timer) async {
+        if (controller.isClosed) {
+          timer.cancel();
+          return;
+        }
+        
+        try {
+          final items = await _fetchActionItems(projectId);
+          controller.add(items);
+        } catch (e) {
+          print('Error refreshing action items: $e');
+          // Only add error if controller is still open
+          if (!controller.isClosed) {
+            controller.addError(e);
+          }
+        }
       });
+      
+      // Initial fetch
+      final initialItems = await _fetchActionItems(projectId);
+      controller.add(initialItems);
+      
+      // Handle cleanup when the stream is cancelled
+      yield* controller.stream;
+    } finally {
+      await controller.close();
+    }
   }
 
   Future<List<ActionItem>> batchCreateItems(
     String projectId, 
     List<ActionItem> items
   ) async {
-    String? userId = await _authService.getCurrentUserId();
-    if (userId == null) throw const ActionPlanException('User not authenticated');
-
-    final batch = _firestore.batch();
-    final collection = _getActionItemsCollection(userId, projectId);
-    final createdItems = <ActionItem>[];
-
     try {
-      for (final item in items) {
-        final nextId = await _getNextId(projectId);
-        final newItem = item.copyWith(
-          task: item.task,
-          responsible: item.responsible,
-          update: item.update,
-          updatedAt: DateTime.now(),
-        );
-
-        final doc = collection.doc(nextId);
-        batch.set(doc, newItem.toFirestore());
-        createdItems.add(newItem);
+      final response = await _apiClient.post(
+        '/projects/$projectId/actions/batch',
+        {
+          'items': items.map((item) => {
+            'task': item.task,
+            'responsible': item.responsible,
+            'completionDate': item.completionDate?.toIso8601String(),
+            'update': item.update,
+            'status': _serializeStatus(item.status)
+          }).toList()
+        }
+      );
+      
+      if (response['success'] && response['data'] != null) {
+        final createdItems = (response['data'] as List)
+            .map((itemData) => ActionItem(
+                id: itemData['id'],
+                task: itemData['task'] ?? '',
+                responsible: itemData['responsible'] ?? '',
+                completionDate: itemData['completionDate'] != null 
+                    ? DateTime.parse(itemData['completionDate']) 
+                    : null,
+                update: itemData['update'] ?? '',
+                createdAt: DateTime.parse(itemData['createdAt']),
+                updatedAt: itemData['updatedAt'] != null 
+                    ? DateTime.parse(itemData['updatedAt']) 
+                    : null,
+                status: _parseStatus(itemData['status'])
+            ))
+            .toList();
+            
+        return createdItems;
       }
-
-      await batch.commit();
-      return createdItems;
+      
+      throw Exception('Failed to batch create items');
     } catch (e) {
-      throw ActionPlanException('Failed to batch create items: $e');
+      print('Error batch creating items: $e');
+      throw Exception('Failed to batch create items: $e');
     }
   }
 
   Future<ActionItem> createActionItem(String projectId, ActionItem item) async {
-    return _withRetry(() async {
-      String? userId = await _authService.getCurrentUserId();
-      if (userId == null) throw const ActionPlanException('User not authenticated');
-
-      final collection = _getActionItemsCollection(userId, projectId);
-      final nextId = await _getNextId(projectId);
-      
-      final newItem = ActionItem(
-        id: nextId,
-        task: item.task,
-        responsible: item.responsible,
-        update: item.update,
-        createdAt: DateTime.now(),
-        status: TaskStatus.incomplete,
+    try {
+      final response = await _apiClient.post(
+        '/projects/$projectId/actions',
+        {
+          'task': item.task,
+          'responsible': item.responsible,
+          'completionDate': item.completionDate?.toIso8601String(),
+          'update': item.update,
+          'status': _serializeStatus(item.status)
+        }
       );
-
-      await collection.doc(nextId).set(newItem.toFirestore());
-      return newItem;
-    });
+      
+      if (response['success'] && response['data'] != null) {
+        final itemData = response['data'];
+        
+        return ActionItem(
+          id: itemData['id'],
+          task: itemData['task'] ?? '',
+          responsible: itemData['responsible'] ?? '',
+          completionDate: itemData['completionDate'] != null 
+              ? DateTime.parse(itemData['completionDate']) 
+              : null,
+          update: itemData['update'] ?? '',
+          createdAt: DateTime.parse(itemData['createdAt']),
+          updatedAt: itemData['updatedAt'] != null 
+              ? DateTime.parse(itemData['updatedAt']) 
+              : null,
+          status: _parseStatus(itemData['status'])
+        );
+      }
+      
+      throw Exception('Failed to create action item');
+    } catch (e) {
+      print('Error creating action item: $e');
+      throw Exception('Failed to create action item: $e');
+    }
   }
 
   Future<void> batchUpdateItems(
     String projectId, 
     List<ActionItem> items
   ) async {
-    String? userId = await _authService.getCurrentUserId();
-    if (userId == null) throw const ActionPlanException('User not authenticated');
-
-    final batch = _firestore.batch();
-    final collection = _getActionItemsCollection(userId, projectId);
-
     try {
-      for (final item in items) {
-        final doc = collection.doc(item.id);
-        batch.update(doc, {
-          ...item.toFirestore(),
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
+      final response = await _apiClient.put(
+        '/projects/$projectId/actions/batch',
+        {
+          'items': items.map((item) => {
+            'id': item.id,
+            'task': item.task,
+            'responsible': item.responsible,
+            'completionDate': item.completionDate?.toIso8601String(),
+            'update': item.update,
+            'status': _serializeStatus(item.status)
+          }).toList()
+        }
+      );
+      
+      if (!response['success']) {
+        throw Exception('Failed to batch update items');
       }
-
-      await batch.commit();
     } catch (e) {
-      throw ActionPlanException('Failed to batch update items: $e');
+      print('Error batch updating items: $e');
+      throw Exception('Failed to batch update items: $e');
     }
   }
 
   Future<void> updateActionItem(String projectId, ActionItem item) async {
-    return _withRetry(() async {
-      String? userId = await _authService.getCurrentUserId();
-      if (userId == null) throw const ActionPlanException('User not authenticated');
-
-      await _getActionItemsCollection(userId, projectId)
-        .doc(item.id)
-        .update({
-          ...item.toFirestore(),
-          'updatedAt': FieldValue.serverTimestamp(),
-        });
-    });
+    try {
+      final response = await _apiClient.put(
+        '/projects/$projectId/actions/${item.id}',
+        {
+          'task': item.task,
+          'responsible': item.responsible,
+          'completionDate': item.completionDate?.toIso8601String(),
+          'update': item.update,
+          'status': _serializeStatus(item.status)
+        }
+      );
+      
+      if (!response['success']) {
+        throw Exception('Failed to update action item');
+      }
+    } catch (e) {
+      print('Error updating action item: $e');
+      throw Exception('Failed to update action item: $e');
+    }
   }
 
   Future<void> batchDeleteItems(String projectId, List<String> itemIds) async {
-    String? userId = await _authService.getCurrentUserId();
-    if (userId == null) throw const ActionPlanException('User not authenticated');
-
-    final batch = _firestore.batch();
-    final collection = _getActionItemsCollection(userId, projectId);
-
     try {
-      for (final id in itemIds) {
-        final doc = collection.doc(id);
-        batch.delete(doc);
+      final response = await _apiClient.post(
+        '/projects/$projectId/actions/batch',
+        {'ids': itemIds}
+      );
+      
+      if (!response['success']) {
+        throw Exception('Failed to batch delete items');
       }
-
-      await batch.commit();
     } catch (e) {
-      throw ActionPlanException('Failed to batch delete items: $e');
+      print('Error batch deleting items: $e');
+      throw Exception('Failed to batch delete items: $e');
     }
   }
 
   Future<void> deleteActionItem(String projectId, String itemId) async {
-    return _withRetry(() async {
-      String? userId = await _authService.getCurrentUserId();
-      if (userId == null) throw const ActionPlanException('User not authenticated');
-
-      await _getActionItemsCollection(userId, projectId)
-        .doc(itemId)
-        .delete();
-    });
+    try {
+      final response = await _apiClient.delete('/projects/$projectId/actions/$itemId');
+      
+      if (!response['success']) {
+        throw Exception('Failed to delete action item');
+      }
+    } catch (e) {
+      print('Error deleting action item: $e');
+      throw Exception('Failed to delete action item: $e');
+    }
   }
 
   Future<Map<String, dynamic>> getActionItemStats(String projectId) async {
-    String? userId = await _authService.getCurrentUserId();
-    if (userId == null) throw const ActionPlanException('User not authenticated');
-
     try {
-      final items = _cache[projectId] ?? 
-        (await _getActionItemsCollection(userId, projectId).get())
-          .docs
-          .map((doc) => ActionItem.fromFirestore(doc))
-          .toList();
-
-      final stats = <TaskStatus, int>{
-        for (final status in TaskStatus.values)
-          status: items.where((item) => item.status == status).length
-      };
-
-      final total = items.length;
-      return {
-        'total': total,
-        'statusCounts': stats,
-        'completionRate': total > 0 
-          ? (stats[TaskStatus.complete]! / total * 100).round() 
-          : 0,
-      };
+      final response = await _apiClient.get('/projects/$projectId/actions/stats');
+      
+      if (response['success'] && response['data'] != null) {
+        return response['data'];
+      }
+      
+      throw Exception('Failed to get action item stats');
     } catch (e) {
-      throw ActionPlanException('Failed to get action item stats: $e');
+      print('Error getting action item stats: $e');
+      throw Exception('Failed to get action item stats: $e');
     }
   }
-}
-
-class ActionPlanException implements Exception {
-  final String message;
-  const ActionPlanException(this.message);
-  
-  @override
-  String toString() => 'ActionPlanException: $message';
 }

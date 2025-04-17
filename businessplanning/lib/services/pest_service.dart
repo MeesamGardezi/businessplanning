@@ -1,43 +1,68 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
+// lib/services/pest_service.dart
+import 'dart:async';
+import '../config/api_config.dart';
 import '../models/pest_models.dart';
-import 'auth_service.dart';
+import 'api_client.dart';
 
 class PestService {
-  final FirebaseFirestore _firestore;
-  final AuthService _authService;
-
-  PestService({
-    FirebaseFirestore? firestore,
-    AuthService? authService,
-  })  : _firestore = firestore ?? FirebaseFirestore.instance,
-        _authService = authService ?? AuthService();
+  final ApiClient _apiClient = ApiClient(baseUrl: ApiConfig.baseUrl);
 
   // Get the PEST collection reference for a project
-  Future<CollectionReference> _getPestCollection(String projectId) async {
-    final userId = await _authService.getCurrentUserId();
-    if (userId == null) throw Exception('User not authenticated');
-
-    return _firestore
-        .collection('users')
-        .doc(userId)
-        .collection('projects')
-        .doc(projectId)
-        .collection('pest_factors');
+  Future<List<PestFactor>> _fetchPestFactors(String projectId) async {
+    try {
+      final response = await _apiClient.get('/projects/$projectId/pest');
+      
+      if (response['success'] && response['data']['factors'] != null) {
+        return (response['data']['factors'] as List)
+            .map((factorData) => PestFactor(
+                id: factorData['id'],
+                text: factorData['text'] ?? '',
+                type: PestFactorType.fromString(factorData['type']),
+                impact: factorData['impact'] ?? 3,
+                timeframe: factorData['timeframe'],
+                createdAt: DateTime.parse(factorData['createdAt']),
+                updatedAt: factorData['updatedAt'] != null 
+                    ? DateTime.parse(factorData['updatedAt']) 
+                    : null
+            ))
+            .toList();
+      }
+      
+      return [];
+    } catch (e) {
+      print('Error fetching PEST factors: $e');
+      throw e;
+    }
   }
 
   // Create a new PEST factor
   Future<PestFactor> createPestFactor(String projectId, PestFactor factor) async {
     try {
-      final collection = await _getPestCollection(projectId);
-
-      // Create the document with server timestamp
-      final docRef = await collection.add({
-        ...factor.toFirestore(),
-        'createdAt': FieldValue.serverTimestamp(),
-      });
-
-      // Return the factor with the new ID
-      return factor.copyWith(id: docRef.id);
+      final response = await _apiClient.post(
+        '/projects/$projectId/pest',
+        {
+          'text': factor.text,
+          'type': factor.type.toShortString(),
+          'impact': factor.impact,
+          'timeframe': factor.timeframe
+        }
+      );
+      
+      if (response['success'] && response['data'] != null) {
+        final factorData = response['data'];
+        
+        return PestFactor(
+          id: factorData['id'],
+          text: factorData['text'],
+          type: PestFactorType.fromString(factorData['type']),
+          impact: factorData['impact'],
+          timeframe: factorData['timeframe'],
+          createdAt: DateTime.now(),
+          updatedAt: null
+        );
+      }
+      
+      throw Exception('Failed to create PEST factor');
     } catch (e) {
       print('Error creating PEST factor: $e');
       throw Exception('Failed to create PEST factor: $e');
@@ -46,50 +71,139 @@ class PestService {
 
   // Get all PEST factors for a project as a stream
   Stream<PestAnalysis> getPestAnalysis(String projectId) async* {
+    StreamController<PestAnalysis> controller = StreamController<PestAnalysis>();
+    
     try {
-      final collection = await _getPestCollection(projectId);
-
-      yield* collection
-          .orderBy('createdAt', descending: true)
-          .snapshots()
-          .map((snapshot) {
-        final factors = snapshot.docs
-            .map((doc) => PestFactor.fromFirestore(doc))
-            .toList();
-        return PestAnalysis.fromFactors(factors);
+      // Setup periodic refresh of data
+      Timer.periodic(Duration(seconds: 30), (timer) async {
+        if (controller.isClosed) {
+          timer.cancel();
+          return;
+        }
+        
+        try {
+          final factors = await _fetchPestFactors(projectId);
+          controller.add(PestAnalysis.fromFactors(factors));
+        } catch (e) {
+          print('Error refreshing PEST factors: $e');
+          // Only add error if controller is still open
+          if (!controller.isClosed) {
+            controller.addError(e);
+          }
+        }
       });
-    } catch (e) {
-      print('Error getting PEST analysis: $e');
-      yield PestAnalysis(); // Return empty analysis on error
+      
+      // Initial fetch
+      final initialFactors = await _fetchPestFactors(projectId);
+      controller.add(PestAnalysis.fromFactors(initialFactors));
+      
+      // Handle cleanup when the stream is cancelled
+      yield* controller.stream;
+    } finally {
+      await controller.close();
     }
   }
 
   // Get factors by type
   Stream<List<PestFactor>> getFactorsByType(
       String projectId, PestFactorType type) async* {
+    StreamController<List<PestFactor>> controller = StreamController<List<PestFactor>>();
+    
     try {
-      final collection = await _getPestCollection(projectId);
-
-      yield* collection
-          .where('type', isEqualTo: type.toShortString())
-          .orderBy('createdAt', descending: true)
-          .snapshots()
-          .map((snapshot) =>
-              snapshot.docs.map((doc) => PestFactor.fromFirestore(doc)).toList());
-    } catch (e) {
-      print('Error getting PEST factors by type: $e');
-      yield [];
+      // Setup periodic refresh of data
+      Timer.periodic(Duration(seconds: 30), (timer) async {
+        if (controller.isClosed) {
+          timer.cancel();
+          return;
+        }
+        
+        try {
+          final response = await _apiClient.get(
+            '/projects/$projectId/pest?type=${type.toShortString()}'
+          );
+          
+          if (response['success'] && response['data']['factors'] != null) {
+            final factors = (response['data']['factors'] as List)
+                .map((factorData) => PestFactor(
+                    id: factorData['id'],
+                    text: factorData['text'] ?? '',
+                    type: PestFactorType.fromString(factorData['type']),
+                    impact: factorData['impact'] ?? 3,
+                    timeframe: factorData['timeframe'],
+                    createdAt: DateTime.parse(factorData['createdAt']),
+                    updatedAt: factorData['updatedAt'] != null 
+                        ? DateTime.parse(factorData['updatedAt']) 
+                        : null
+                ))
+                .toList();
+                
+            controller.add(factors);
+          } else {
+            controller.add([]);
+          }
+        } catch (e) {
+          print('Error refreshing PEST factors by type: $e');
+          // Only add error if controller is still open
+          if (!controller.isClosed) {
+            controller.addError(e);
+          }
+        }
+      });
+      
+      // Initial fetch
+      final response = await _apiClient.get(
+        '/projects/$projectId/pest?type=${type.toShortString()}'
+      );
+      
+      if (response['success'] && response['data']['factors'] != null) {
+        final factors = (response['data']['factors'] as List)
+            .map((factorData) => PestFactor(
+                id: factorData['id'],
+                text: factorData['text'] ?? '',
+                type: PestFactorType.fromString(factorData['type']),
+                impact: factorData['impact'] ?? 3,
+                timeframe: factorData['timeframe'],
+                createdAt: DateTime.parse(factorData['createdAt']),
+                updatedAt: factorData['updatedAt'] != null 
+                    ? DateTime.parse(factorData['updatedAt']) 
+                    : null
+            ))
+            .toList();
+            
+        controller.add(factors);
+      } else {
+        controller.add([]);
+      }
+      
+      // Handle cleanup when the stream is cancelled
+      yield* controller.stream;
+    } finally {
+      await controller.close();
     }
   }
 
   // Get a single factor
   Future<PestFactor?> getPestFactor(String projectId, String factorId) async {
     try {
-      final collection = await _getPestCollection(projectId);
-      final doc = await collection.doc(factorId).get();
-
-      if (!doc.exists) return null;
-      return PestFactor.fromFirestore(doc);
+      final response = await _apiClient.get('/projects/$projectId/pest/$factorId');
+      
+      if (response['success'] && response['data'] != null) {
+        final factorData = response['data'];
+        
+        return PestFactor(
+          id: factorData['id'],
+          text: factorData['text'] ?? '',
+          type: PestFactorType.fromString(factorData['type']),
+          impact: factorData['impact'] ?? 3,
+          timeframe: factorData['timeframe'],
+          createdAt: DateTime.parse(factorData['createdAt']),
+          updatedAt: factorData['updatedAt'] != null 
+              ? DateTime.parse(factorData['updatedAt']) 
+              : null
+        );
+      }
+      
+      return null;
     } catch (e) {
       print('Error getting PEST factor: $e');
       throw Exception('Failed to get PEST factor: $e');
@@ -103,17 +217,23 @@ class PestService {
     PestFactor factor,
   ) async {
     try {
-      final collection = await _getPestCollection(projectId);
-      final updateData = factor.toFirestore();
-
-      // Add update timestamp
-      updateData['updatedAt'] = FieldValue.serverTimestamp();
-
-      await collection.doc(factorId).update(updateData);
-
-      // Fetch and return the updated document
-      final updatedDoc = await collection.doc(factorId).get();
-      return PestFactor.fromFirestore(updatedDoc);
+      final response = await _apiClient.put(
+        '/projects/$projectId/pest/$factorId',
+        {
+          'text': factor.text,
+          'type': factor.type.toShortString(),
+          'impact': factor.impact,
+          'timeframe': factor.timeframe
+        }
+      );
+      
+      if (response['success']) {
+        return factor.copyWith(
+          updatedAt: DateTime.now()
+        );
+      }
+      
+      throw Exception('Failed to update PEST factor');
     } catch (e) {
       print('Error updating PEST factor: $e');
       throw Exception('Failed to update PEST factor: $e');
@@ -123,60 +243,14 @@ class PestService {
   // Delete a factor
   Future<void> deletePestFactor(String projectId, String factorId) async {
     try {
-      final collection = await _getPestCollection(projectId);
-      await collection.doc(factorId).delete();
+      final response = await _apiClient.delete('/projects/$projectId/pest/$factorId');
+      
+      if (!response['success']) {
+        throw Exception('Failed to delete PEST factor');
+      }
     } catch (e) {
       print('Error deleting PEST factor: $e');
       throw Exception('Failed to delete PEST factor: $e');
-    }
-  }
-
-  // Delete all factors for a project
-  Future<void> deleteAllPestFactors(String projectId) async {
-    try {
-      final collection = await _getPestCollection(projectId);
-      final batch = _firestore.batch();
-
-      final snapshots = await collection.get();
-      for (var doc in snapshots.docs) {
-        batch.delete(doc.reference);
-      }
-
-      await batch.commit();
-    } catch (e) {
-      print('Error deleting all PEST factors: $e');
-      throw Exception('Failed to delete all PEST factors: $e');
-    }
-  }
-
-  // Batch create multiple factors
-  Future<List<PestFactor>> batchCreatePestFactors(
-    String projectId,
-    List<PestFactor> factors,
-  ) async {
-    try {
-      final collection = await _getPestCollection(projectId);
-      final batch = _firestore.batch();
-      final List<DocumentReference> refs = [];
-
-      // Create references and add to batch
-      for (var factor in factors) {
-        final ref = collection.doc();
-        refs.add(ref);
-        batch.set(ref, {
-          ...factor.toFirestore(),
-          'createdAt': FieldValue.serverTimestamp(),
-        });
-      }
-
-      await batch.commit();
-
-      // Fetch all created documents
-      final createdDocs = await Future.wait(refs.map((ref) => ref.get()));
-      return createdDocs.map((doc) => PestFactor.fromFirestore(doc)).toList();
-    } catch (e) {
-      print('Error batch creating PEST factors: $e');
-      throw Exception('Failed to batch create PEST factors: $e');
     }
   }
 
@@ -187,15 +261,18 @@ class PestService {
     int newImpact,
   ) async {
     try {
-      final factor = await getPestFactor(projectId, factorId);
-      if (factor == null) throw Exception('PEST factor not found');
-
-      final updatedFactor = factor.copyWith(
-        impact: newImpact,
-        updatedAt: DateTime.now(),
+      final response = await _apiClient.put(
+        '/projects/$projectId/pest/$factorId/impact',
+        {'impact': newImpact}
       );
-
-      return await updatePestFactor(projectId, factorId, updatedFactor);
+      
+      if (response['success']) {
+        final factor = await getPestFactor(projectId, factorId);
+        if (factor == null) throw Exception('Failed to retrieve updated factor');
+        return factor;
+      }
+      
+      throw Exception('Failed to update factor impact');
     } catch (e) {
       print('Error updating PEST factor impact: $e');
       throw Exception('Failed to update PEST factor impact: $e');
@@ -209,60 +286,21 @@ class PestService {
     String newTimeframe,
   ) async {
     try {
-      final factor = await getPestFactor(projectId, factorId);
-      if (factor == null) throw Exception('PEST factor not found');
-
-      final updatedFactor = factor.copyWith(
-        timeframe: newTimeframe,
-        updatedAt: DateTime.now(),
+      final response = await _apiClient.put(
+        '/projects/$projectId/pest/$factorId/timeframe',
+        {'timeframe': newTimeframe}
       );
-
-      return await updatePestFactor(projectId, factorId, updatedFactor);
+      
+      if (response['success']) {
+        final factor = await getPestFactor(projectId, factorId);
+        if (factor == null) throw Exception('Failed to retrieve updated factor');
+        return factor;
+      }
+      
+      throw Exception('Failed to update factor timeframe');
     } catch (e) {
       print('Error updating PEST factor timeframe: $e');
       throw Exception('Failed to update PEST factor timeframe: $e');
     }
-  }
-
-  // Get analysis summary
-  Future<Map<String, dynamic>> getAnalysisSummary(String projectId) async {
-    try {
-      final collection = await _getPestCollection(projectId);
-      final snapshot = await collection.get();
-      final factors = snapshot.docs.map((doc) => PestFactor.fromFirestore(doc)).toList();
-      final analysis = PestAnalysis.fromFactors(factors);
-
-      return {
-        'totalFactors': factors.length,
-        'factorsByType': {
-          for (var type in PestFactorType.values)
-            type.toShortString(): analysis.getFactorsByType(type).length
-        },
-        'averageImpacts': {
-          for (var type in PestFactorType.values)
-            type.toShortString(): analysis.getAverageImpact(type)
-        },
-        'timeframeDistribution': _calculateTimeframeDistribution(factors),
-      };
-    } catch (e) {
-      print('Error getting PEST analysis summary: $e');
-      throw Exception('Failed to get PEST analysis summary: $e');
-    }
-  }
-
-  Map<String, int> _calculateTimeframeDistribution(List<PestFactor> factors) {
-    final distribution = <String, int>{
-      'short-term': 0,
-      'medium-term': 0,
-      'long-term': 0,
-      'unspecified': 0,
-    };
-
-    for (var factor in factors) {
-      final timeframe = factor.timeframe?.toLowerCase() ?? 'unspecified';
-      distribution[timeframe] = (distribution[timeframe] ?? 0) + 1;
-    }
-
-    return distribution;
   }
 }
