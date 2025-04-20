@@ -19,18 +19,18 @@ class _RegisterPageState extends State<RegisterPage> {
   // Access global app state
   final AppState _appState = AppState();
   final AuthService _auth = AuthService();
-  
+
   // Form keys and controllers
   final _formKey = GlobalKey<FormState>();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
-  
+
   // Focus nodes
   final _emailFocusNode = FocusNode();
   final _passwordFocusNode = FocusNode();
   final _confirmPasswordFocusNode = FocusNode();
-  
+
   // Local state as ValueNotifiers
   final ValueNotifier<bool> _isPasswordStep = ValueNotifier<bool>(false);
   final ValueNotifier<String> _email = ValueNotifier<String>('');
@@ -42,20 +42,20 @@ class _RegisterPageState extends State<RegisterPage> {
   @override
   void initState() {
     super.initState();
-    
+
     // Set up controller listeners
     _emailController.addListener(() {
       _email.value = _emailController.text;
     });
-    
+
     _passwordController.addListener(() {
       _password.value = _passwordController.text;
     });
-    
+
     _confirmPasswordController.addListener(() {
       _confirmPassword.value = _confirmPasswordController.text;
     });
-    
+
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
         FocusScope.of(context).requestFocus(_emailFocusNode);
@@ -69,12 +69,12 @@ class _RegisterPageState extends State<RegisterPage> {
     _emailController.dispose();
     _passwordController.dispose();
     _confirmPasswordController.dispose();
-    
+
     // Dispose focus nodes
     _emailFocusNode.dispose();
     _passwordFocusNode.dispose();
     _confirmPasswordFocusNode.dispose();
-    
+
     // Dispose ValueNotifiers
     _isPasswordStep.dispose();
     _email.dispose();
@@ -82,13 +82,13 @@ class _RegisterPageState extends State<RegisterPage> {
     _confirmPassword.dispose();
     _isLoading.dispose();
     _errorMessage.dispose();
-    
+
     super.dispose();
   }
 
   void _moveToPasswordStep() {
     if (!mounted) return;
-    
+
     if (_formKey.currentState!.validate()) {
       _isPasswordStep.value = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -134,21 +134,28 @@ class _RegisterPageState extends State<RegisterPage> {
 
   Future<void> _submitRegistration() async {
     if (!mounted) return;
-    
+
     if (_formKey.currentState!.validate()) {
       _isLoading.value = true;
       _errorMessage.value = null;
 
       try {
         final result = await _auth.registerWithEmailAndPassword(
-          _email.value, 
-          _password.value
-        );
+            _email.value, _password.value);
 
         if (!mounted) return;
 
         if (result['success']) {
-          context.go('/complete-profile', extra: result['userId']);
+          // Get the user ID from the result
+          final userId = result['userId'] as String?;
+
+          if (userId != null && userId.isNotEmpty) {
+            // Navigate with userId as a route parameter
+            context.go('/complete-profile/$userId');
+          } else {
+            // Fallback - navigate without the userId
+            context.go('/complete-profile');
+          }
         } else {
           _errorMessage.value = result['message'] ?? 'Registration failed';
         }
@@ -166,8 +173,8 @@ class _RegisterPageState extends State<RegisterPage> {
 
   void _handleEnterKey(RawKeyEvent event) {
     if (!mounted) return;
-    
-    if (event is RawKeyDownEvent && 
+
+    if (event is RawKeyDownEvent &&
         event.logicalKey == LogicalKeyboardKey.enter) {
       if (!_isPasswordStep.value) {
         _moveToPasswordStep();
@@ -180,7 +187,7 @@ class _RegisterPageState extends State<RegisterPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    
+
     return Scaffold(
       body: RawKeyboardListener(
         focusNode: FocusNode(),
@@ -225,7 +232,9 @@ class _RegisterPageState extends State<RegisterPage> {
       decoration: BoxDecoration(
         color: theme.colorScheme.surface,
         borderRadius: BorderRadius.circular(AppTheme.radiusXL),
-        boxShadow: theme.isDarkMode ? AppTheme.shadowMediumDark : AppTheme.shadowMedium,
+        boxShadow: theme.isDarkMode
+            ? AppTheme.shadowMediumDark
+            : AppTheme.shadowMedium,
       ),
       child: Form(
         key: _formKey,
@@ -260,8 +269,8 @@ class _RegisterPageState extends State<RegisterPage> {
               builder: (context, isPasswordStep, _) {
                 return Text(
                   isPasswordStep
-                    ? 'Choose a secure password for your account'
-                    : 'Start planning your business strategy',
+                      ? 'Choose a secure password for your account'
+                      : 'Start planning your business strategy',
                   style: theme.textTheme.bodyLarge?.copyWith(
                     color: theme.textSecondaryColor,
                   ),
@@ -302,7 +311,7 @@ class _RegisterPageState extends State<RegisterPage> {
       padding: const EdgeInsets.only(bottom: AppTheme.spaceLG),
       child: IconButton(
         icon: Icon(
-          Icons.arrow_back, 
+          Icons.arrow_back,
           color: theme.textSecondaryColor,
         ),
         padding: EdgeInsets.zero,
@@ -331,7 +340,7 @@ class _RegisterPageState extends State<RegisterPage> {
               labelText: 'Email',
               hintText: 'Enter your business email',
               prefixIcon: Icon(
-                Icons.email_outlined, 
+                Icons.email_outlined,
                 color: theme.textSecondaryColor,
               ),
               border: OutlineInputBorder(
@@ -365,7 +374,7 @@ class _RegisterPageState extends State<RegisterPage> {
                       labelText: 'Password',
                       hintText: 'Create a strong password',
                       prefixIcon: Icon(
-                        Icons.lock_outline, 
+                        Icons.lock_outline,
                         color: theme.textSecondaryColor,
                       ),
                       border: OutlineInputBorder(
@@ -373,17 +382,20 @@ class _RegisterPageState extends State<RegisterPage> {
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(AppTheme.radiusMD),
-                        borderSide: BorderSide(color: theme.colorScheme.outline),
+                        borderSide:
+                            BorderSide(color: theme.colorScheme.outline),
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(AppTheme.radiusMD),
-                        borderSide: BorderSide(color: theme.primaryColor, width: 2),
+                        borderSide:
+                            BorderSide(color: theme.primaryColor, width: 2),
                       ),
                     ),
                     validator: _validatePassword,
                     onFieldSubmitted: (_) {
                       if (mounted) {
-                        FocusScope.of(context).requestFocus(_confirmPasswordFocusNode);
+                        FocusScope.of(context)
+                            .requestFocus(_confirmPasswordFocusNode);
                       }
                     },
                   );
@@ -401,7 +413,7 @@ class _RegisterPageState extends State<RegisterPage> {
                       labelText: 'Confirm Password',
                       hintText: 'Confirm your password',
                       prefixIcon: Icon(
-                        Icons.lock_outline, 
+                        Icons.lock_outline,
                         color: theme.textSecondaryColor,
                       ),
                       border: OutlineInputBorder(
@@ -409,11 +421,13 @@ class _RegisterPageState extends State<RegisterPage> {
                       ),
                       enabledBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(AppTheme.radiusMD),
-                        borderSide: BorderSide(color: theme.colorScheme.outline),
+                        borderSide:
+                            BorderSide(color: theme.colorScheme.outline),
                       ),
                       focusedBorder: OutlineInputBorder(
                         borderRadius: BorderRadius.circular(AppTheme.radiusMD),
-                        borderSide: BorderSide(color: theme.primaryColor, width: 2),
+                        borderSide:
+                            BorderSide(color: theme.primaryColor, width: 2),
                       ),
                     ),
                     validator: _validateConfirmPassword,
@@ -434,7 +448,7 @@ class _RegisterPageState extends State<RegisterPage> {
       child: RichText(
         text: TextSpan(
           style: TextStyle(
-            fontSize: 14, 
+            fontSize: 14,
             color: theme.textSecondaryColor,
           ),
           children: [
@@ -471,7 +485,7 @@ class _RegisterPageState extends State<RegisterPage> {
               ),
             );
           }
-          
+
           return ValueListenableBuilder<bool>(
             valueListenable: _isPasswordStep,
             builder: (context, isPasswordStep, _) {
@@ -486,7 +500,8 @@ class _RegisterPageState extends State<RegisterPage> {
                 style: ElevatedButton.styleFrom(
                   backgroundColor: theme.primaryColor,
                   foregroundColor: theme.colorScheme.onPrimary,
-                  padding: const EdgeInsets.symmetric(vertical: AppTheme.spaceMD),
+                  padding:
+                      const EdgeInsets.symmetric(vertical: AppTheme.spaceMD),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(AppTheme.radiusMD),
                   ),
@@ -519,8 +534,8 @@ class _RegisterPageState extends State<RegisterPage> {
         child: Row(
           children: [
             Icon(
-              Icons.error_outline, 
-              size: 20, 
+              Icons.error_outline,
+              size: 20,
               color: theme.colorScheme.error,
             ),
             const SizedBox(width: AppTheme.spaceMD),

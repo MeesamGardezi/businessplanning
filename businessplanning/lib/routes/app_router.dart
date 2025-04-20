@@ -9,6 +9,7 @@ import '../pages/home_page.dart';
 import '../pages/login_page.dart';
 import '../pages/register_page.dart';
 import '../pages/dashboard_page.dart';
+import '../pages/complete_profile_page.dart'; // Add this import
 import '../state/app_state.dart';
 import '../utils/transitions.dart';
 
@@ -79,12 +80,13 @@ class AppRouter {
       final bool isLoggingIn = state.matchedLocation == '/login';
       final bool isRegistering = state.matchedLocation == '/register';
       final bool isHomePage = state.matchedLocation == '/';
+      final bool isCompletingProfile = state.matchedLocation.startsWith('/complete-profile');
 
       if (!isLoggedIn) {
         if (!isHomePage &&
             !isLoggingIn &&
             !isRegistering &&
-            !state.matchedLocation.startsWith('/complete-profile')) {
+            !isCompletingProfile) {
           final currentPath = state.uri.toString();
           _logTiming('Redirect to login', totalStopwatch.elapsed);
           return '/login?redirect=${Uri.encodeComponent(currentPath)}';
@@ -111,7 +113,7 @@ class AppRouter {
         final currentUserId = _appState.currentUserId.value;
         _logTiming('User ID fetch', userIdStopwatch.elapsed);
 
-        if (state.matchedLocation.startsWith('/complete-profile')) {
+        if (isCompletingProfile) {
           final profileUserId = state.pathParameters['userId'];
           if (profileUserId != currentUserId) {
             final signOutStopwatch = Stopwatch()..start();
@@ -122,7 +124,7 @@ class AppRouter {
           }
         }
 
-        if (userStatus == 'incomplete') {
+        if (userStatus == 'incomplete' && !isCompletingProfile) {
           final redirectPath = currentUserId != null
               ? '/complete-profile/$currentUserId'
               : '/login';
@@ -207,6 +209,32 @@ class AppRouter {
           child: RegisterPage(),
         );
         _logTiming('RegisterPage build', stopwatch.elapsed);
+        return page;
+      },
+    ),
+    // Add the complete-profile route
+    GoRoute(
+      path: '/complete-profile/:userId',
+      pageBuilder: (context, state) {
+        final stopwatch = Stopwatch()..start();
+        final userId = state.pathParameters['userId'] ?? '';
+        final page = InstantPageTransition(
+          child: CompleteProfilePage(userId: userId),
+        );
+        _logTiming('CompleteProfilePage build', stopwatch.elapsed);
+        return page;
+      },
+    ),
+    // Add a simpler route without userId parameter for direct navigation from register page
+    GoRoute(
+      path: '/complete-profile',
+      pageBuilder: (context, state) {
+        final stopwatch = Stopwatch()..start();
+        final userId = state.extra as String? ?? '';
+        final page = InstantPageTransition(
+          child: CompleteProfilePage(userId: userId),
+        );
+        _logTiming('CompleteProfilePage (from extra) build', stopwatch.elapsed);
         return page;
       },
     ),
